@@ -44,7 +44,6 @@ APM0014540-INFRASTRUCTURE:bugfix/cleanup
     GITHUB_ORG        = 'ATT-TEST-GA'
     MIRROR_BACKUP_DIR = '/opt/git-mirror-backups'
     ALLOWED_APPROVERS = 'admin,cloudops,devopslead'
-    REPORT_FILE       = 'branch_operation_audit.csv'
   }
 
   stages {
@@ -67,37 +66,6 @@ APM0014540-INFRASTRUCTURE:bugfix/cleanup
       }
     }
 
-    stage('Approval Gate') {
-      steps {
-        script {
-          def approver = input(
-            message: """Approve branch operation:
-
-${params.REPO_BRANCH_INPUT}
-
-DRY_RUN: ${params.DRY_RUN}
-DELETE: ${params.ENABLE_DELETE}
-BACKOUT: ${params.ENABLE_BACKOUT}
-""",
-            ok: 'APPROVE',
-            submitter: env.ALLOWED_APPROVERS,
-            submitterParameter: 'APPROVED_BY'
-          )
-
-          writeFile file: 'approved.txt', text: params.REPO_BRANCH_INPUT.trim()
-          env.APPROVED_BY = approver
-        }
-      }
-    }
-
-    stage('Initialize Audit Report') {
-      steps {
-        sh '''
-echo "Timestamp,JobName,BuildNumber,ApprovedBy,Repo,Branch,Action,Status,BackupPath" > ${REPORT_FILE}
-'''
-      }
-    }
-
     stage('Validate All Branches First') {
       steps {
         sh '''#!/usr/bin/env bash
@@ -114,7 +82,7 @@ while IFS= read -r raw || [ -n "$raw" ]; do
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
 
-  # ---- Protected check ----
+  # Protected branch check
   for P in "${PROTECTED[@]}"; do
     if [ "$BRANCH" = "$P" ]; then
       PROTECTED_BRANCHES+=("$REPO:$BRANCH")
@@ -122,10 +90,10 @@ while IFS= read -r raw || [ -n "$raw" ]; do
   done
 
   if [[ "$BRANCH" == release/* ]]; then
-      PROTECTED_BRANCHES+=("$REPO:$BRANCH")
+    PROTECTED_BRANCHES+=("$REPO:$BRANCH")
   fi
 
-  # ---- Branch existence check ----
+  # Branch existence check
   STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
@@ -134,7 +102,7 @@ while IFS= read -r raw || [ -n "$raw" ]; do
     MISSING_BRANCHES+=("$REPO:$BRANCH")
   fi
 
-done < approved.txt
+done < <(echo "${REPO_BRANCH_INPUT}")
 
 if [ ${#PROTECTED_BRANCHES[@]} -gt 0 ]; then
   echo "❌ Protected branches detected:"
@@ -153,6 +121,27 @@ echo "✅ All branches validated successfully."
       }
     }
 
+    stage('Approval Gate') {
+      when {
+        expression { return !params.DRY_RUN }
+      }
+      steps {
+        script {
+          input(
+            message: """Approve branch operation:
+
+${params.REPO_BRANCH_INPUT}
+
+DELETE: ${params.ENABLE_DELETE}
+BACKOUT: ${params.ENABLE_BACKOUT}
+""",
+            ok: 'APPROVE',
+            submitter: env.ALLOWED_APPROVERS
+          )
+        }
+      }
+    }
+
     stage('Backup (Only When Deleting)') {
       when {
         expression { return !params.DRY_RUN && params.ENABLE_DELETE }
@@ -164,7 +153,6 @@ set -euo pipefail
 mkdir -p "${MIRROR_BACKUP_DIR}"
 
 while IFS= read -r raw || [ -n "$raw" ]; do
-
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
   REPO="${line%%:*}"
   TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
@@ -179,7 +167,7 @@ while IFS= read -r raw || [ -n "$raw" ]; do
       "$TARGET"
   fi
 
-done < approved.txt
+done < <(echo "${REPO_BRANCH_INPUT}")
 '''
       }
     }
@@ -193,19 +181,17 @@ done < approved.txt
 set -euo pipefail
 
 while IFS= read -r raw || [ -n "$raw" ]; do
-
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
-  TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
 
   curl -s -X DELETE \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH}"
 
-  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,DELETE,SUCCESS,$TARGET" >> ${REPORT_FILE}
+  echo "Deleted $REPO:$BRANCH"
 
-done < approved.txt
+done < <(echo "${REPO_BRANCH_INPUT}")
 '''
       }
     }
@@ -219,7 +205,6 @@ done < approved.txt
 set -euo pipefail
 
 while IFS= read -r raw || [ -n "$raw" ]; do
-
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
@@ -233,19 +218,11 @@ while IFS= read -r raw || [ -n "$raw" ]; do
 
   cd - >/dev/null
 
-  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,BACKOUT,RESTORED,$TARGET" >> ${REPORT_FILE}
+  echo "Restored $REPO:$BRANCH"
 
-done < approved.txt
+done < <(echo "${REPO_BRANCH_INPUT}")
 '''
       }
-    }
-  }
-
-  post {
-    always {
-      archiveArtifacts artifacts: '*.csv',
-                       fingerprint: true,
-                       allowEmptyArchive: true
     }
   }
 }
