@@ -5,26 +5,14 @@ pipeline {
     timestamps()
     disableConcurrentBuilds()
     buildDiscarder(logRotator(numToKeepStr: '30'))
-    timeout(time: 45, unit: 'MINUTES')
+    timeout(time: 60, unit: 'MINUTES')
   }
 
   parameters {
     booleanParam(
       name: 'DRY_RUN',
       defaultValue: true,
-      description: 'TRUE = Validation only. FALSE = Allow delete/backout'
-    )
-
-    booleanParam(
-      name: 'ENABLE_DELETE',
-      defaultValue: false,
-      description: 'Enable branch deletion'
-    )
-
-    booleanParam(
-      name: 'ENABLE_BACKOUT',
-      defaultValue: false,
-      description: 'Restore branch from mirror backup'
+      description: 'TRUE = Validation only. FALSE = Request delete'
     )
 
     text(
@@ -32,8 +20,7 @@ pipeline {
       defaultValue: '',
       description: '''Enter repo:branch pairs (one per line)
 Example:
-APM0012058-TEST:feature/old-login
-APM0014540-INFRASTRUCTURE:bugfix/temp
+APM0012058-TEST:feature/test
 '''
     )
   }
@@ -54,14 +41,6 @@ APM0014540-INFRASTRUCTURE:bugfix/temp
           if (!params.REPO_BRANCH_INPUT?.trim()) {
             error('❌ REPO_BRANCH_INPUT cannot be empty')
           }
-
-          if (!params.DRY_RUN && !params.ENABLE_DELETE && !params.ENABLE_BACKOUT) {
-            error('❌ When DRY_RUN=false, enable DELETE or BACKOUT')
-          }
-
-          if (params.ENABLE_DELETE && params.ENABLE_BACKOUT) {
-            error('❌ DELETE and BACKOUT cannot run together')
-          }
         }
       }
     }
@@ -69,34 +48,31 @@ APM0014540-INFRASTRUCTURE:bugfix/temp
     stage('Initialize Audit Report') {
       steps {
         sh '''
-echo "Timestamp,JobName,BuildNumber,NodeName,ApprovedBy,Repo,Branch,Action,Status,OperationMode,BackupPath" > ${REPORT_FILE}
+echo "Timestamp,JobName,BuildNumber,NodeName,ApprovedBy,Repo,Branch,Action,Status,BackupTaken" > ${REPORT_FILE}
 '''
       }
     }
 
-    stage('Validate All Branches First') {
+    stage('Enterprise Validation') {
       steps {
         sh '''#!/usr/bin/env bash
 set -euo pipefail
 
-# Default enterprise protected branches
-PROTECTED_EXACT=("main" "master" "develop" "dev" "prod" "production" "uat" "qa" "stage" "staging")
-PROTECTED_PREFIX=("release/" "hotfix/")
+PROTECTED_EXACT=("main" "master" "develop" "dev" "prod" "production" "uat" "qa" "stage" "staging" "head")
+PROTECTED_PREFIX=("release/" "hotfix/" "support/")
 
 declare -A SEEN
-MISSING=()
 PROTECTED_HITS=()
+MISSING=()
 
 while IFS= read -r raw || [ -n "$raw" ]; do
-  line=$(echo "$raw" | sed 's/|/:/g' | xargs)
+  line=$(echo "$raw" | xargs)
   [ -z "$line" ] && continue
 
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
-
   KEY="${REPO}:${BRANCH}"
 
-  # Prevent duplicates
   if [[ -n "${SEEN[$KEY]:-}" ]]; then
     continue
   fi
@@ -104,14 +80,12 @@ while IFS= read -r raw || [ -n "$raw" ]; do
 
   BRANCH_LOWER=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]')
 
-  # Exact protected match
   for P in "${PROTECTED_EXACT[@]}"; do
     if [[ "$BRANCH_LOWER" == "$P" ]]; then
       PROTECTED_HITS+=("$REPO:$BRANCH")
     fi
   done
 
-  # Prefix protected match
   for P in "${PROTECTED_PREFIX[@]}"; do
     if [[ "$BRANCH_LOWER" == ${P}* ]]; then
       PROTECTED_HITS+=("$REPO:$BRANCH")
@@ -120,6 +94,7 @@ while IFS= read -r raw || [ -n "$raw" ]; do
 
   STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
 
   if [ "$STATUS" = "404" ]; then
@@ -129,7 +104,7 @@ while IFS= read -r raw || [ -n "$raw" ]; do
 done < <(echo "${REPO_BRANCH_INPUT}")
 
 if [ ${#PROTECTED_HITS[@]} -gt 0 ]; then
-  echo "❌ Protected branches detected:"
+  echo "❌ Attempt to delete protected branches:"
   printf '%s\n' "${PROTECTED_HITS[@]}"
   exit 1
 fi
@@ -140,106 +115,116 @@ if [ ${#MISSING[@]} -gt 0 ]; then
   exit 1
 fi
 
-echo "✅ Validation successful."
+echo "✅ Enterprise validation successful."
 '''
       }
     }
 
-    stage('Approval Gate') {
+    stage('Approval Gate (Governed Decision)') {
       when {
         expression { return !params.DRY_RUN }
       }
       steps {
         script {
-          def approver = input(
-            message: """Approve operation:
+          def decision = input(
+            message: """PRODUCTION DELETE APPROVAL REQUIRED
 
 ${params.REPO_BRANCH_INPUT}
 
-DELETE: ${params.ENABLE_DELETE}
-BACKOUT: ${params.ENABLE_BACKOUT}
+Select action:
 """,
-            ok: 'APPROVE',
+            ok: 'PROCEED',
             submitter: env.ALLOWED_APPROVERS,
-            submitterParameter: 'APPROVED_BY'
+            parameters: [
+              choice(
+                name: 'DELETE_MODE',
+                choices: ['BACKUP_AND_DELETE', 'DIRECT_DELETE'],
+                description: 'Select deletion mode'
+              )
+            ]
           )
-          env.APPROVED_BY = approver
+
+          env.DELETE_MODE = decision
         }
       }
     }
 
-    stage('Backup (Only When Deleting)') {
+    stage('Backup (If Selected)') {
       when {
-        expression { return !params.DRY_RUN && params.ENABLE_DELETE }
+        expression {
+          return !params.DRY_RUN &&
+                 env.DELETE_MODE == 'BACKUP_AND_DELETE'
+        }
       }
       steps {
-        sh '''#!/usr/bin/env bash
+        sh '''
 set -euo pipefail
-
 mkdir -p "${MIRROR_BACKUP_DIR}"
 
-while IFS= read -r raw || [ -n "$raw" ]; do
-  line=$(echo "$raw" | sed 's/|/:/g' | xargs)
+while read line; do
+  line=$(echo "$line" | xargs)
   [ -z "$line" ] && continue
 
   REPO="${line%%:*}"
   TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
 
   if [ -d "$TARGET" ]; then
-    cd "$TARGET"
-    git remote update
-    cd - >/dev/null
+    cd "$TARGET" && git remote update && cd - >/dev/null
   else
     git clone --mirror \
       https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
       "$TARGET"
   fi
 
-done < <(echo "${REPO_BRANCH_INPUT}")
+done <<< "${REPO_BRANCH_INPUT}"
 
 echo "✅ Backup completed."
 '''
       }
     }
 
-    stage('Delete / Backout Execution') {
+    stage('Delete Execution (With HTTP Handling)') {
       when {
         expression { return !params.DRY_RUN }
       }
       steps {
-        sh '''#!/usr/bin/env bash
+        sh '''
 set -euo pipefail
 
-MODE="DELETE"
-[ "${ENABLE_BACKOUT}" = "true" ] && MODE="BACKOUT"
+BACKUP_STATUS="NO"
+[ "${DELETE_MODE}" = "BACKUP_AND_DELETE" ] && BACKUP_STATUS="YES"
 
-while IFS= read -r raw || [ -n "$raw" ]; do
-  line=$(echo "$raw" | sed 's/|/:/g' | xargs)
+while read line; do
+  line=$(echo "$line" | xargs)
   [ -z "$line" ] && continue
 
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
-  TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
 
-  if [ "$MODE" = "DELETE" ]; then
-    curl -s -X DELETE \
-      -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-      "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH}"
+  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X DELETE \
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH}")
+
+  if [ "$HTTP_CODE" = "204" ]; then
     STATUS="DELETED"
+  elif [ "$HTTP_CODE" = "404" ]; then
+    echo "❌ Branch not found: $REPO:$BRANCH"
+    exit 1
+  elif [ "$HTTP_CODE" = "403" ]; then
+    echo "❌ Permission denied: $REPO:$BRANCH"
+    exit 1
   else
-    cd "$TARGET"
-    git push \
-      https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
-      refs/heads/${BRANCH}:refs/heads/${BRANCH}
-    cd - >/dev/null
-    STATUS="RESTORED"
+    echo "❌ GitHub API failed with HTTP $HTTP_CODE for $REPO:$BRANCH"
+    exit 1
   fi
 
-  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${NODE_NAME},${APPROVED_BY:-SYSTEM},$REPO,$BRANCH,$MODE,$STATUS,$MODE,$TARGET" >> ${REPORT_FILE}
+  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${NODE_NAME},${APPROVED_BY:-SYSTEM},$REPO,$BRANCH,DELETE,${STATUS},${BACKUP_STATUS}" >> ${REPORT_FILE}
 
-done < <(echo "${REPO_BRANCH_INPUT}")
+done <<< "${REPO_BRANCH_INPUT}"
 
-echo "✅ Operation completed."
+echo "✅ Production delete completed."
 '''
       }
     }
