@@ -44,6 +44,7 @@ APM0014540-INFRASTRUCTURE:bugfix/cleanup
     GITHUB_ORG        = 'ATT-TEST-GA'
     MIRROR_BACKUP_DIR = '/opt/git-mirror-backups'
     ALLOWED_APPROVERS = 'admin,cloudops,devopslead'
+    REPORT_FILE       = 'branch_operation_audit.csv'
   }
 
   stages {
@@ -66,6 +67,14 @@ APM0014540-INFRASTRUCTURE:bugfix/cleanup
       }
     }
 
+    stage('Initialize Audit Report') {
+      steps {
+        sh '''
+echo "Timestamp,JobName,BuildNumber,Repo,Branch,Action,Status" > ${REPORT_FILE}
+'''
+      }
+    }
+
     stage('Validate All Branches First') {
       steps {
         sh '''#!/usr/bin/env bash
@@ -73,46 +82,45 @@ set -euo pipefail
 
 PROTECTED=("main" "master" "develop" "prod" "release")
 
-MISSING_BRANCHES=()
-PROTECTED_BRANCHES=()
+MISSING=()
+PROTECTED_HITS=()
 
 while IFS= read -r raw || [ -n "$raw" ]; do
-
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
 
-  # Protected branch check
+  # Protected check
   for P in "${PROTECTED[@]}"; do
     if [ "$BRANCH" = "$P" ]; then
-      PROTECTED_BRANCHES+=("$REPO:$BRANCH")
+      PROTECTED_HITS+=("$REPO:$BRANCH")
     fi
   done
 
   if [[ "$BRANCH" == release/* ]]; then
-    PROTECTED_BRANCHES+=("$REPO:$BRANCH")
+    PROTECTED_HITS+=("$REPO:$BRANCH")
   fi
 
-  # Branch existence check
+  # Existence check
   STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
 
   if [ "$STATUS" = "404" ]; then
-    MISSING_BRANCHES+=("$REPO:$BRANCH")
+    MISSING+=("$REPO:$BRANCH")
   fi
 
 done < <(echo "${REPO_BRANCH_INPUT}")
 
-if [ ${#PROTECTED_BRANCHES[@]} -gt 0 ]; then
-  echo "❌ Protected branches detected:"
-  printf '%s\n' "${PROTECTED_BRANCHES[@]}"
+if [ ${#PROTECTED_HITS[@]} -gt 0 ]; then
+  echo "❌ Protected branches:"
+  printf '%s\n' "${PROTECTED_HITS[@]}"
   exit 1
 fi
 
-if [ ${#MISSING_BRANCHES[@]} -gt 0 ]; then
-  echo "❌ The following branches do NOT exist:"
-  printf '%s\n' "${MISSING_BRANCHES[@]}"
+if [ ${#MISSING[@]} -gt 0 ]; then
+  echo "❌ Missing branches:"
+  printf '%s\n' "${MISSING[@]}"
   exit 1
 fi
 
@@ -189,6 +197,7 @@ while IFS= read -r raw || [ -n "$raw" ]; do
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH}"
 
+  echo "$(date),${JOB_NAME},${BUILD_NUMBER},$REPO,$BRANCH,DELETE,SUCCESS" >> ${REPORT_FILE}
   echo "Deleted $REPO:$BRANCH"
 
 done < <(echo "${REPO_BRANCH_INPUT}")
@@ -218,11 +227,20 @@ while IFS= read -r raw || [ -n "$raw" ]; do
 
   cd - >/dev/null
 
+  echo "$(date),${JOB_NAME},${BUILD_NUMBER},$REPO,$BRANCH,BACKOUT,RESTORED" >> ${REPORT_FILE}
   echo "Restored $REPO:$BRANCH"
 
 done < <(echo "${REPO_BRANCH_INPUT}")
 '''
       }
+    }
+  }
+
+  post {
+    always {
+      archiveArtifacts artifacts: '*.csv',
+                       fingerprint: true,
+                       allowEmptyArchive: true
     }
   }
 }
