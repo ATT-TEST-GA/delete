@@ -12,13 +12,13 @@ pipeline {
     booleanParam(
       name: 'DRY_RUN',
       defaultValue: true,
-      description: 'TRUE = Backup only. FALSE = Allow delete/backout'
+      description: 'TRUE = Validate + Backup only. FALSE = Allow delete/backout'
     )
 
     booleanParam(
       name: 'ENABLE_DELETE',
       defaultValue: false,
-      description: 'Must be checked to delete branches'
+      description: 'Enable branch deletion'
     )
 
     booleanParam(
@@ -57,7 +57,7 @@ APM0014540-INFRASTRUCTURE:bugfix/cleanup
           }
 
           if (!params.DRY_RUN && !params.ENABLE_DELETE && !params.ENABLE_BACKOUT) {
-            error('❌ When DRY_RUN=false, either DELETE or BACKOUT must be enabled')
+            error('❌ When DRY_RUN=false, enable DELETE or BACKOUT')
           }
 
           if (params.ENABLE_DELETE && params.ENABLE_BACKOUT) {
@@ -85,7 +85,6 @@ BACKOUT: ${params.ENABLE_BACKOUT}
           )
 
           writeFile file: 'approved.txt', text: params.REPO_BRANCH_INPUT.trim()
-          writeFile file: 'approved_by.txt', text: approver
           env.APPROVED_BY = approver
         }
       }
@@ -99,10 +98,12 @@ echo "Timestamp,JobName,BuildNumber,ApprovedBy,Repo,Branch,Action,Status,BackupP
       }
     }
 
-    stage('Mirror Backup (Real Backup)') {
+    stage('Validate Branch & Backup') {
       steps {
         sh '''#!/usr/bin/env bash
 set -euo pipefail
+
+PROTECTED=("main" "master" "develop" "prod" "release")
 
 mkdir -p "${MIRROR_BACKUP_DIR}"
 
@@ -113,14 +114,46 @@ while IFS= read -r raw || [ -n "$raw" ]; do
   BRANCH="${line##*:}"
   TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
 
+  # ---- PROTECTED CHECK ----
+  for P in "${PROTECTED[@]}"; do
+    if [ "$BRANCH" = "$P" ]; then
+      echo "❌ Protected branch blocked: $BRANCH"
+      echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,VALIDATION,BLOCKED_PROTECTED_BRANCH,$TARGET" >> ${REPORT_FILE}
+      exit 1
+    fi
+  done
+
+  if [[ "$BRANCH" == release/* ]]; then
+      echo "❌ Release branch blocked: $BRANCH"
+      echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,VALIDATION,BLOCKED_RELEASE_BRANCH,$TARGET" >> ${REPORT_FILE}
+      exit 1
+  fi
+
+  # ---- CHECK BRANCH EXISTS ----
+  STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
+
+  if [ "$STATUS" = "404" ]; then
+      echo "ℹ Branch not found: $REPO:$BRANCH"
+      echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,VALIDATION,BRANCH_NOT_FOUND,$TARGET" >> ${REPORT_FILE}
+      continue
+  fi
+
+  if [ "$STATUS" != "200" ]; then
+      echo "❌ GitHub API error for $REPO:$BRANCH"
+      exit 1
+  fi
+
+  # ---- BACKUP ----
   if [ -d "$TARGET" ]; then
-    cd "$TARGET"
-    git remote update
-    cd - >/dev/null
+      cd "$TARGET"
+      git remote update
+      cd - >/dev/null
   else
-    git clone --mirror \
-      https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
-      "$TARGET"
+      git clone --mirror \
+        https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
+        "$TARGET"
   fi
 
   echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,BACKUP,SUCCESS,$TARGET" >> ${REPORT_FILE}
@@ -138,39 +171,11 @@ done < approved.txt
         sh '''#!/usr/bin/env bash
 set -euo pipefail
 
-PROTECTED_EXACT=("main" "master" "develop" "prod" "release")
-
 while IFS= read -r raw || [ -n "$raw" ]; do
-
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
   TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
-
-  # Exact protection
-  for P in "${PROTECTED_EXACT[@]}"; do
-    if [ "$BRANCH" = "$P" ]; then
-      echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,DELETE,BLOCKED_PROTECTED_BRANCH,$TARGET" >> ${REPORT_FILE}
-      echo "❌ Protected branch blocked: $BRANCH"
-      exit 1
-    fi
-  done
-
-  # Prefix protection release/*
-  if [[ "$BRANCH" == release/* ]]; then
-    echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,DELETE,BLOCKED_RELEASE_BRANCH,$TARGET" >> ${REPORT_FILE}
-    echo "❌ Release branch blocked: $BRANCH"
-    exit 1
-  fi
-
-  STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
-
-  if [ "$STATUS" = "404" ]; then
-    echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,DELETE,ALREADY_DELETED,$TARGET" >> ${REPORT_FILE}
-    continue
-  fi
 
   curl -s -X DELETE \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
@@ -183,7 +188,7 @@ done < approved.txt
       }
     }
 
-    stage('Backout (Restore Branch)') {
+    stage('Backout') {
       when {
         expression { return !params.DRY_RUN && params.ENABLE_BACKOUT }
       }
@@ -192,7 +197,6 @@ done < approved.txt
 set -euo pipefail
 
 while IFS= read -r raw || [ -n "$raw" ]; do
-
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
@@ -216,17 +220,9 @@ done < approved.txt
 
   post {
     always {
-      archiveArtifacts artifacts: '*.csv,approved.txt,approved_by.txt',
+      archiveArtifacts artifacts: '*.csv',
                        fingerprint: true,
                        allowEmptyArchive: true
-    }
-
-    success {
-      echo "✅ Branch operation completed successfully"
-    }
-
-    failure {
-      echo "❌ Pipeline failed — operation halted safely"
     }
   }
 }
