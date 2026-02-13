@@ -4,38 +4,24 @@ pipeline {
   options {
     timestamps()
     disableConcurrentBuilds()
-    buildDiscarder(logRotator(numToKeepStr: '30'))
-    timeout(time: 45, unit: 'MINUTES')
+    buildDiscarder(logRotator(
+      numToKeepStr: '100',
+      artifactNumToKeepStr: '100'
+    ))
+    timeout(time: 60, unit: 'MINUTES')
   }
 
   parameters {
-    booleanParam(
-      name: 'DRY_RUN',
-      defaultValue: true,
-      description: 'TRUE = Validation only. FALSE = Allow delete/backout'
-    )
-
-    booleanParam(
-      name: 'ENABLE_DELETE',
-      defaultValue: false,
-      description: 'Enable branch deletion'
-    )
-
-    booleanParam(
-      name: 'ENABLE_BACKOUT',
-      defaultValue: false,
-      description: 'Restore branch from mirror backup'
+    choice(
+      name: 'OPERATION_MODE',
+      choices: ['VALIDATE', 'DELETE', 'BACKOUT'],
+      description: 'Select operation mode'
     )
 
     text(
       name: 'REPO_BRANCH_INPUT',
       defaultValue: '',
-      description: '''Enter repo:branch pairs (one per line)
-
-Example:
-APM0012058-TEST:feature/test1
-APM0014540-INFRASTRUCTURE:bugfix/cleanup
-'''
+      description: 'Enter repo:branch pairs (one per line)'
     )
   }
 
@@ -44,6 +30,7 @@ APM0014540-INFRASTRUCTURE:bugfix/cleanup
     GITHUB_ORG        = 'ATT-TEST-GA'
     MIRROR_BACKUP_DIR = '/opt/git-mirror-backups'
     ALLOWED_APPROVERS = 'admin,cloudops,devopslead'
+    REPORT_FILE       = "github_branch_operation_audit_${BUILD_NUMBER}.csv"
   }
 
   stages {
@@ -54,43 +41,52 @@ APM0014540-INFRASTRUCTURE:bugfix/cleanup
           if (!params.REPO_BRANCH_INPUT?.trim()) {
             error('❌ REPO_BRANCH_INPUT cannot be empty')
           }
-
-          if (!params.DRY_RUN && !params.ENABLE_DELETE && !params.ENABLE_BACKOUT) {
-            error('❌ When DRY_RUN=false, enable DELETE or BACKOUT')
-          }
-
-          if (params.ENABLE_DELETE && params.ENABLE_BACKOUT) {
-            error('❌ DELETE and BACKOUT cannot run together')
-          }
         }
+      }
+    }
+
+    stage('Initialize Audit Report') {
+      steps {
+        sh '''
+echo "Timestamp,JobName,BuildNumber,NodeName,ApprovedBy,Repo,Branch,Action,Status,HTTPStatus,BackupPath" > ${REPORT_FILE}
+'''
       }
     }
 
     stage('Validate All Branches First') {
       steps {
-        sh '''#!/usr/bin/env bash
+        sh '''
+#!/usr/bin/env bash
 set -euo pipefail
 
-PROTECTED=("main" "master" "develop" "prod" "release")
-
-MISSING_BRANCHES=()
-PROTECTED_BRANCHES=()
+PROTECTED_STATIC=("main" "master" "develop" "prod" "release")
+MISSING=()
+PROTECTED_HITS=()
 
 while IFS= read -r raw || [ -n "$raw" ]; do
-
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
 
-  # Protected branch check
-  for P in "${PROTECTED[@]}"; do
+  # Get default branch dynamically
+  DEFAULT_BRANCH=$(curl -s \
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    "https://api.github.com/repos/${GITHUB_ORG}/${REPO}" | \
+    grep '"default_branch"' | cut -d '"' -f4)
+
+  if [ "$BRANCH" = "$DEFAULT_BRANCH" ]; then
+    PROTECTED_HITS+=("$REPO:$BRANCH (default branch)")
+  fi
+
+  # Static protected check
+  for P in "${PROTECTED_STATIC[@]}"; do
     if [ "$BRANCH" = "$P" ]; then
-      PROTECTED_BRANCHES+=("$REPO:$BRANCH")
+      PROTECTED_HITS+=("$REPO:$BRANCH")
     fi
   done
 
   if [[ "$BRANCH" == release/* ]]; then
-    PROTECTED_BRANCHES+=("$REPO:$BRANCH")
+    PROTECTED_HITS+=("$REPO:$BRANCH")
   fi
 
   # Branch existence check
@@ -99,55 +95,55 @@ while IFS= read -r raw || [ -n "$raw" ]; do
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
 
   if [ "$STATUS" = "404" ]; then
-    MISSING_BRANCHES+=("$REPO:$BRANCH")
+    MISSING+=("$REPO:$BRANCH")
   fi
 
 done < <(echo "${REPO_BRANCH_INPUT}")
 
-if [ ${#PROTECTED_BRANCHES[@]} -gt 0 ]; then
+if [ ${#PROTECTED_HITS[@]} -gt 0 ]; then
   echo "❌ Protected branches detected:"
-  printf '%s\n' "${PROTECTED_BRANCHES[@]}"
+  printf '%s\n' "${PROTECTED_HITS[@]}"
   exit 1
 fi
 
-if [ ${#MISSING_BRANCHES[@]} -gt 0 ]; then
-  echo "❌ The following branches do NOT exist:"
-  printf '%s\n' "${MISSING_BRANCHES[@]}"
+if [ ${#MISSING[@]} -gt 0 ]; then
+  echo "❌ Missing branches:"
+  printf '%s\n' "${MISSING[@]}"
   exit 1
 fi
 
-echo "✅ All branches validated successfully."
+echo "✅ Validation successful."
 '''
       }
     }
 
     stage('Approval Gate') {
       when {
-        expression { return !params.DRY_RUN }
+        expression { return params.OPERATION_MODE != 'VALIDATE' }
       }
       steps {
         script {
-          input(
-            message: """Approve branch operation:
+          def approver = input(
+            message: """Approve ${params.OPERATION_MODE} operation:
 
 ${params.REPO_BRANCH_INPUT}
-
-DELETE: ${params.ENABLE_DELETE}
-BACKOUT: ${params.ENABLE_BACKOUT}
 """,
             ok: 'APPROVE',
-            submitter: env.ALLOWED_APPROVERS
+            submitter: env.ALLOWED_APPROVERS,
+            submitterParameter: 'APPROVED_BY'
           )
+          env.APPROVED_BY = approver
         }
       }
     }
 
-    stage('Backup (Only When Deleting)') {
+    stage('Backup (DELETE Only)') {
       when {
-        expression { return !params.DRY_RUN && params.ENABLE_DELETE }
+        expression { return params.OPERATION_MODE == 'DELETE' }
       }
       steps {
-        sh '''#!/usr/bin/env bash
+        sh '''
+#!/usr/bin/env bash
 set -euo pipefail
 
 mkdir -p "${MIRROR_BACKUP_DIR}"
@@ -167,42 +163,27 @@ while IFS= read -r raw || [ -n "$raw" ]; do
       "$TARGET"
   fi
 
-done < <(echo "${REPO_BRANCH_INPUT}")
-'''
-      }
-    }
-
-    stage('Delete Branches') {
-      when {
-        expression { return !params.DRY_RUN && params.ENABLE_DELETE }
-      }
-      steps {
-        sh '''#!/usr/bin/env bash
-set -euo pipefail
-
-while IFS= read -r raw || [ -n "$raw" ]; do
-  line=$(echo "$raw" | sed 's/|/:/g' | xargs)
-  REPO="${line%%:*}"
-  BRANCH="${line##*:}"
-
-  curl -s -X DELETE \
-    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH}"
-
-  echo "Deleted $REPO:$BRANCH"
+  # Ensure backup exists
+  if [ ! -d "$TARGET" ]; then
+    echo "❌ Backup verification failed"
+    exit 1
+  fi
 
 done < <(echo "${REPO_BRANCH_INPUT}")
 '''
       }
     }
 
-    stage('Backout') {
+    stage('Execute Operation') {
       when {
-        expression { return !params.DRY_RUN && params.ENABLE_BACKOUT }
+        expression { return params.OPERATION_MODE != 'VALIDATE' }
       }
       steps {
-        sh '''#!/usr/bin/env bash
+        sh '''
+#!/usr/bin/env bash
 set -euo pipefail
+
+MODE="${OPERATION_MODE}"
 
 while IFS= read -r raw || [ -n "$raw" ]; do
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
@@ -210,19 +191,43 @@ while IFS= read -r raw || [ -n "$raw" ]; do
   BRANCH="${line##*:}"
   TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
 
-  cd "$TARGET"
+  if [ "$MODE" = "DELETE" ]; then
+    HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" \
+      -X DELETE \
+      -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+      "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH}")
 
-  git push \
-    https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
-    refs/heads/${BRANCH}:refs/heads/${BRANCH}
+    if [ "$HTTP_STATUS" != "204" ]; then
+      cat response.json
+      echo "$(date),${JOB_NAME},${BUILD_NUMBER},${NODE_NAME},${APPROVED_BY:-SYSTEM},$REPO,$BRANCH,DELETE,FAILED,$HTTP_STATUS,$TARGET" >> ${REPORT_FILE}
+      exit 1
+    fi
 
-  cd - >/dev/null
+    STATUS_LABEL="DELETED"
 
-  echo "Restored $REPO:$BRANCH"
+  else
+    cd "$TARGET"
+    git push \
+      https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
+      refs/heads/${BRANCH}:refs/heads/${BRANCH}
+    cd - >/dev/null
+    STATUS_LABEL="RESTORED"
+    HTTP_STATUS="200"
+  fi
+
+  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${NODE_NAME},${APPROVED_BY:-SYSTEM},$REPO,$BRANCH,$MODE,$STATUS_LABEL,$HTTP_STATUS,$TARGET" >> ${REPORT_FILE}
 
 done < <(echo "${REPO_BRANCH_INPUT}")
 '''
       }
+    }
+  }
+
+  post {
+    always {
+      archiveArtifacts artifacts: '*.csv',
+                       fingerprint: true,
+                       allowEmptyArchive: true
     }
   }
 }
