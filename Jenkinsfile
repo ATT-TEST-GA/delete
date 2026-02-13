@@ -30,12 +30,7 @@ pipeline {
     text(
       name: 'REPO_BRANCH_INPUT',
       defaultValue: '',
-      description: '''Enter repo:branch pairs (one per line)
-
-Example:
-APM0012058-TEST:feature/test1
-APM0014540-INFRASTRUCTURE:bugfix/cleanup
-'''
+      description: '''Enter repo:branch pairs (one per line)'''
     )
   }
 
@@ -70,7 +65,7 @@ APM0014540-INFRASTRUCTURE:bugfix/cleanup
     stage('Initialize Audit Report') {
       steps {
         sh '''
-echo "Timestamp,JobName,BuildNumber,Repo,Branch,Action,Status" > ${REPORT_FILE}
+echo "Timestamp,JobName,BuildNumber,NodeName,ApprovedBy,Repo,Branch,Action,Status,OperationMode,BackupPath" > ${REPORT_FILE}
 '''
       }
     }
@@ -90,7 +85,6 @@ while IFS= read -r raw || [ -n "$raw" ]; do
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
 
-  # Protected check
   for P in "${PROTECTED[@]}"; do
     if [ "$BRANCH" = "$P" ]; then
       PROTECTED_HITS+=("$REPO:$BRANCH")
@@ -101,7 +95,6 @@ while IFS= read -r raw || [ -n "$raw" ]; do
     PROTECTED_HITS+=("$REPO:$BRANCH")
   fi
 
-  # Existence check
   STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
@@ -124,7 +117,7 @@ if [ ${#MISSING[@]} -gt 0 ]; then
   exit 1
 fi
 
-echo "✅ All branches validated successfully."
+echo "✅ Validation successful."
 '''
       }
     }
@@ -135,8 +128,8 @@ echo "✅ All branches validated successfully."
       }
       steps {
         script {
-          input(
-            message: """Approve branch operation:
+          def approver = input(
+            message: """Approve operation:
 
 ${params.REPO_BRANCH_INPUT}
 
@@ -144,8 +137,10 @@ DELETE: ${params.ENABLE_DELETE}
 BACKOUT: ${params.ENABLE_BACKOUT}
 """,
             ok: 'APPROVE',
-            submitter: env.ALLOWED_APPROVERS
+            submitter: env.ALLOWED_APPROVERS,
+            submitterParameter: 'APPROVED_BY'
           )
+          env.APPROVED_BY = approver
         }
       }
     }
@@ -180,38 +175,16 @@ done < <(echo "${REPO_BRANCH_INPUT}")
       }
     }
 
-    stage('Delete Branches') {
+    stage('Delete / Backout Execution') {
       when {
-        expression { return !params.DRY_RUN && params.ENABLE_DELETE }
+        expression { return !params.DRY_RUN }
       }
       steps {
         sh '''#!/usr/bin/env bash
 set -euo pipefail
 
-while IFS= read -r raw || [ -n "$raw" ]; do
-  line=$(echo "$raw" | sed 's/|/:/g' | xargs)
-  REPO="${line%%:*}"
-  BRANCH="${line##*:}"
-
-  curl -s -X DELETE \
-    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH}"
-
-  echo "$(date),${JOB_NAME},${BUILD_NUMBER},$REPO,$BRANCH,DELETE,SUCCESS" >> ${REPORT_FILE}
-  echo "Deleted $REPO:$BRANCH"
-
-done < <(echo "${REPO_BRANCH_INPUT}")
-'''
-      }
-    }
-
-    stage('Backout') {
-      when {
-        expression { return !params.DRY_RUN && params.ENABLE_BACKOUT }
-      }
-      steps {
-        sh '''#!/usr/bin/env bash
-set -euo pipefail
+MODE="DELETE"
+[ "${ENABLE_BACKOUT}" = "true" ] && MODE="BACKOUT"
 
 while IFS= read -r raw || [ -n "$raw" ]; do
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
@@ -219,16 +192,21 @@ while IFS= read -r raw || [ -n "$raw" ]; do
   BRANCH="${line##*:}"
   TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
 
-  cd "$TARGET"
+  if [ "$MODE" = "DELETE" ]; then
+    curl -s -X DELETE \
+      -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+      "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH}"
+    STATUS="DELETED"
+  else
+    cd "$TARGET"
+    git push \
+      https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
+      refs/heads/${BRANCH}:refs/heads/${BRANCH}
+    cd - >/dev/null
+    STATUS="RESTORED"
+  fi
 
-  git push \
-    https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
-    refs/heads/${BRANCH}:refs/heads/${BRANCH}
-
-  cd - >/dev/null
-
-  echo "$(date),${JOB_NAME},${BUILD_NUMBER},$REPO,$BRANCH,BACKOUT,RESTORED" >> ${REPORT_FILE}
-  echo "Restored $REPO:$BRANCH"
+  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${NODE_NAME},${APPROVED_BY:-SYSTEM},$REPO,$BRANCH,$MODE,$STATUS,$MODE,$TARGET" >> ${REPORT_FILE}
 
 done < <(echo "${REPO_BRANCH_INPUT}")
 '''
