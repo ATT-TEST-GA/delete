@@ -48,10 +48,9 @@ pipeline {
     stage('Initialize Audit Report') {
       steps {
         sh '''
-#!/bin/bash
-set -e
-
+bash -e <<'EOF'
 echo "Timestamp,JobName,BuildNumber,NodeName,ApprovedBy,Repo,Branch,Action,Status,HTTPStatus,BackupPath" > ${REPORT_FILE}
+EOF
 '''
       }
     }
@@ -59,8 +58,7 @@ echo "Timestamp,JobName,BuildNumber,NodeName,ApprovedBy,Repo,Branch,Action,Statu
     stage('Validate All Branches First') {
       steps {
         sh '''
-#!/bin/bash
-set -euo pipefail
+bash -euo pipefail <<'EOF'
 
 PROTECTED_STATIC=("main" "master" "develop" "prod")
 MISSING=()
@@ -71,7 +69,6 @@ while IFS= read -r raw || [ -n "$raw" ]; do
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
 
-  # Get default branch dynamically
   DEFAULT_BRANCH=$(curl -s \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}" | \
@@ -81,21 +78,18 @@ while IFS= read -r raw || [ -n "$raw" ]; do
     PROTECTED_HITS+=("$REPO:$BRANCH (default branch)")
   fi
 
-  # Static protection
   for P in "${PROTECTED_STATIC[@]}"; do
     if [ "$BRANCH" = "$P" ]; then
       PROTECTED_HITS+=("$REPO:$BRANCH")
     fi
   done
 
-  # Pattern protection
   if [[ "$BRANCH" == release/* ]] || \
      [[ "$BRANCH" == hotfix/* ]] || \
      [[ "$BRANCH" == support/* ]]; then
     PROTECTED_HITS+=("$REPO:$BRANCH (protected pattern)")
   fi
 
-  # Check branch existence
   STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
@@ -119,6 +113,8 @@ if [ ${#MISSING[@]} -gt 0 ]; then
 fi
 
 echo "✅ Validation successful."
+
+EOF
 '''
       }
     }
@@ -149,8 +145,7 @@ ${params.REPO_BRANCH_INPUT}
       }
       steps {
         sh '''
-#!/bin/bash
-set -euo pipefail
+bash -euo pipefail <<'EOF'
 
 mkdir -p "${MIRROR_BACKUP_DIR}"
 
@@ -177,6 +172,8 @@ while IFS= read -r raw || [ -n "$raw" ]; do
 done < <(echo "${REPO_BRANCH_INPUT}")
 
 echo "✅ Backup completed."
+
+EOF
 '''
       }
     }
@@ -187,8 +184,7 @@ echo "✅ Backup completed."
       }
       steps {
         sh '''
-#!/bin/bash
-set -euo pipefail
+bash -euo pipefail <<'EOF'
 
 MODE="${OPERATION_MODE}"
 
@@ -199,6 +195,7 @@ while IFS= read -r raw || [ -n "$raw" ]; do
   TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
 
   if [ "$MODE" = "DELETE" ]; then
+
     HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" \
       -X DELETE \
       -H "Authorization: Bearer ${GITHUB_TOKEN}" \
@@ -218,7 +215,6 @@ while IFS= read -r raw || [ -n "$raw" ]; do
       https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
       refs/heads/${BRANCH}:refs/heads/${BRANCH}
     cd - >/dev/null
-
     STATUS_LABEL="RESTORED"
     HTTP_STATUS="200"
   fi
@@ -228,6 +224,8 @@ while IFS= read -r raw || [ -n "$raw" ]; do
 done < <(echo "${REPO_BRANCH_INPUT}")
 
 echo "✅ Operation completed."
+
+EOF
 '''
       }
     }
