@@ -12,7 +12,7 @@ pipeline {
     booleanParam(
       name: 'DRY_RUN',
       defaultValue: true,
-      description: 'TRUE = Validate + Backup only. FALSE = Allow delete/backout'
+      description: 'TRUE = Validation only. FALSE = Allow delete/backout'
     )
 
     booleanParam(
@@ -49,7 +49,7 @@ APM0014540-INFRASTRUCTURE:bugfix/cleanup
 
   stages {
 
-    stage('Validate Inputs') {
+    stage('Validate Parameters') {
       steps {
         script {
           if (!params.REPO_BRANCH_INPUT?.trim()) {
@@ -98,12 +98,68 @@ echo "Timestamp,JobName,BuildNumber,ApprovedBy,Repo,Branch,Action,Status,BackupP
       }
     }
 
-    stage('Validate Branch & Backup') {
+    stage('Validate All Branches First') {
       steps {
         sh '''#!/usr/bin/env bash
 set -euo pipefail
 
 PROTECTED=("main" "master" "develop" "prod" "release")
+
+MISSING_BRANCHES=()
+PROTECTED_BRANCHES=()
+
+while IFS= read -r raw || [ -n "$raw" ]; do
+
+  line=$(echo "$raw" | sed 's/|/:/g' | xargs)
+  REPO="${line%%:*}"
+  BRANCH="${line##*:}"
+
+  # ---- Protected check ----
+  for P in "${PROTECTED[@]}"; do
+    if [ "$BRANCH" = "$P" ]; then
+      PROTECTED_BRANCHES+=("$REPO:$BRANCH")
+    fi
+  done
+
+  if [[ "$BRANCH" == release/* ]]; then
+      PROTECTED_BRANCHES+=("$REPO:$BRANCH")
+  fi
+
+  # ---- Branch existence check ----
+  STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
+
+  if [ "$STATUS" = "404" ]; then
+    MISSING_BRANCHES+=("$REPO:$BRANCH")
+  fi
+
+done < approved.txt
+
+if [ ${#PROTECTED_BRANCHES[@]} -gt 0 ]; then
+  echo "❌ Protected branches detected:"
+  printf '%s\n' "${PROTECTED_BRANCHES[@]}"
+  exit 1
+fi
+
+if [ ${#MISSING_BRANCHES[@]} -gt 0 ]; then
+  echo "❌ The following branches do NOT exist:"
+  printf '%s\n' "${MISSING_BRANCHES[@]}"
+  exit 1
+fi
+
+echo "✅ All branches validated successfully."
+'''
+      }
+    }
+
+    stage('Backup (Only When Deleting)') {
+      when {
+        expression { return !params.DRY_RUN && params.ENABLE_DELETE }
+      }
+      steps {
+        sh '''#!/usr/bin/env bash
+set -euo pipefail
 
 mkdir -p "${MIRROR_BACKUP_DIR}"
 
@@ -111,52 +167,17 @@ while IFS= read -r raw || [ -n "$raw" ]; do
 
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
   REPO="${line%%:*}"
-  BRANCH="${line##*:}"
   TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
 
-  # ---- PROTECTED CHECK ----
-  for P in "${PROTECTED[@]}"; do
-    if [ "$BRANCH" = "$P" ]; then
-      echo "❌ Protected branch blocked: $BRANCH"
-      echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,VALIDATION,BLOCKED_PROTECTED_BRANCH,$TARGET" >> ${REPORT_FILE}
-      exit 1
-    fi
-  done
-
-  if [[ "$BRANCH" == release/* ]]; then
-      echo "❌ Release branch blocked: $BRANCH"
-      echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,VALIDATION,BLOCKED_RELEASE_BRANCH,$TARGET" >> ${REPORT_FILE}
-      exit 1
-  fi
-
-  # ---- CHECK BRANCH EXISTS ----
-  STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
-
-  if [ "$STATUS" = "404" ]; then
-      echo "ℹ Branch not found: $REPO:$BRANCH"
-      echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,VALIDATION,BRANCH_NOT_FOUND,$TARGET" >> ${REPORT_FILE}
-      continue
-  fi
-
-  if [ "$STATUS" != "200" ]; then
-      echo "❌ GitHub API error for $REPO:$BRANCH"
-      exit 1
-  fi
-
-  # ---- BACKUP ----
   if [ -d "$TARGET" ]; then
-      cd "$TARGET"
-      git remote update
-      cd - >/dev/null
+    cd "$TARGET"
+    git remote update
+    cd - >/dev/null
   else
-      git clone --mirror \
-        https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
-        "$TARGET"
+    git clone --mirror \
+      https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
+      "$TARGET"
   fi
-
-  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,BACKUP,SUCCESS,$TARGET" >> ${REPORT_FILE}
 
 done < approved.txt
 '''
@@ -172,6 +193,7 @@ done < approved.txt
 set -euo pipefail
 
 while IFS= read -r raw || [ -n "$raw" ]; do
+
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
@@ -197,6 +219,7 @@ done < approved.txt
 set -euo pipefail
 
 while IFS= read -r raw || [ -n "$raw" ]; do
+
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
