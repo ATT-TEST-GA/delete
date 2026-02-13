@@ -40,11 +40,11 @@ APM0014540-INFRASTRUCTURE:bugfix/cleanup
   }
 
   environment {
-    GITHUB_TOKEN       = credentials('github-pat')
-    GITHUB_ORG         = 'ATT-TEST-GA'
-    MIRROR_BACKUP_DIR  = '/opt/git-mirror-backups'
-    ALLOWED_APPROVERS  = 'admin,cloudops,devopslead'
-    REPORT_FILE        = 'branch_operation_audit.csv'
+    GITHUB_TOKEN      = credentials('github-pat')
+    GITHUB_ORG        = 'ATT-TEST-GA'
+    MIRROR_BACKUP_DIR = '/opt/git-mirror-backups'
+    ALLOWED_APPROVERS = 'admin,cloudops,devopslead'
+    REPORT_FILE       = 'branch_operation_audit.csv'
   }
 
   stages {
@@ -63,8 +63,6 @@ APM0014540-INFRASTRUCTURE:bugfix/cleanup
           if (params.ENABLE_DELETE && params.ENABLE_BACKOUT) {
             error('❌ DELETE and BACKOUT cannot run together')
           }
-
-          echo "Parameters validated successfully."
         }
       }
     }
@@ -88,8 +86,7 @@ BACKOUT: ${params.ENABLE_BACKOUT}
 
           writeFile file: 'approved.txt', text: params.REPO_BRANCH_INPUT.trim()
           writeFile file: 'approved_by.txt', text: approver
-
-          echo "Approved by: ${approver}"
+          env.APPROVED_BY = approver
         }
       }
     }
@@ -97,7 +94,7 @@ BACKOUT: ${params.ENABLE_BACKOUT}
     stage('Initialize Audit Report') {
       steps {
         sh '''
-echo "Timestamp,Repo,Branch,Action,Status" > ${REPORT_FILE}
+echo "Timestamp,JobName,BuildNumber,ApprovedBy,Repo,Branch,Action,Status,BackupPath" > ${REPORT_FILE}
 '''
       }
     }
@@ -116,8 +113,6 @@ while IFS= read -r raw || [ -n "$raw" ]; do
   BRANCH="${line##*:}"
   TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
 
-  echo "📦 Processing backup for $REPO"
-
   if [ -d "$TARGET" ]; then
     cd "$TARGET"
     git remote update
@@ -128,11 +123,9 @@ while IFS= read -r raw || [ -n "$raw" ]; do
       "$TARGET"
   fi
 
-  echo "$(date),$REPO,$BRANCH,BACKUP,SUCCESS" >> ${REPORT_FILE}
+  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,BACKUP,SUCCESS,$TARGET" >> ${REPORT_FILE}
 
 done < approved.txt
-
-echo "✅ Mirror backup completed"
 '''
       }
     }
@@ -145,28 +138,37 @@ echo "✅ Mirror backup completed"
         sh '''#!/usr/bin/env bash
 set -euo pipefail
 
-PROTECTED=("main" "master" "develop" "prod")
+PROTECTED_EXACT=("main" "master" "develop" "prod" "release")
 
 while IFS= read -r raw || [ -n "$raw" ]; do
 
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
+  TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
 
-  for P in "${PROTECTED[@]}"; do
+  # Exact protection
+  for P in "${PROTECTED_EXACT[@]}"; do
     if [ "$BRANCH" = "$P" ]; then
-      echo "$(date),$REPO,$BRANCH,DELETE,BLOCKED_PROTECTED_BRANCH" >> ${REPORT_FILE}
-      echo "❌ Cannot delete protected branch: $BRANCH"
+      echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,DELETE,BLOCKED_PROTECTED_BRANCH,$TARGET" >> ${REPORT_FILE}
+      echo "❌ Protected branch blocked: $BRANCH"
       exit 1
     fi
   done
+
+  # Prefix protection release/*
+  if [[ "$BRANCH" == release/* ]]; then
+    echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,DELETE,BLOCKED_RELEASE_BRANCH,$TARGET" >> ${REPORT_FILE}
+    echo "❌ Release branch blocked: $BRANCH"
+    exit 1
+  fi
 
   STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
 
   if [ "$STATUS" = "404" ]; then
-    echo "$(date),$REPO,$BRANCH,DELETE,ALREADY_DELETED" >> ${REPORT_FILE}
+    echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,DELETE,ALREADY_DELETED,$TARGET" >> ${REPORT_FILE}
     continue
   fi
 
@@ -174,11 +176,9 @@ while IFS= read -r raw || [ -n "$raw" ]; do
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH}"
 
-  echo "$(date),$REPO,$BRANCH,DELETE,SUCCESS" >> ${REPORT_FILE}
+  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,DELETE,SUCCESS,$TARGET" >> ${REPORT_FILE}
 
 done < approved.txt
-
-echo "🗑 Branch deletion completed"
 '''
       }
     }
@@ -198,8 +198,6 @@ while IFS= read -r raw || [ -n "$raw" ]; do
   BRANCH="${line##*:}"
   TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
 
-  echo "♻ Restoring $REPO:$BRANCH"
-
   cd "$TARGET"
 
   git push \
@@ -208,11 +206,9 @@ while IFS= read -r raw || [ -n "$raw" ]; do
 
   cd - >/dev/null
 
-  echo "$(date),$REPO,$BRANCH,BACKOUT,RESTORED" >> ${REPORT_FILE}
+  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${APPROVED_BY},$REPO,$BRANCH,BACKOUT,RESTORED,$TARGET" >> ${REPORT_FILE}
 
 done < approved.txt
-
-echo "♻ Backout completed"
 '''
       }
     }
@@ -234,4 +230,3 @@ echo "♻ Backout completed"
     }
   }
 }
-
