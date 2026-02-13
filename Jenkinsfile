@@ -48,6 +48,9 @@ pipeline {
     stage('Initialize Audit Report') {
       steps {
         sh '''
+#!/bin/bash
+set -e
+
 echo "Timestamp,JobName,BuildNumber,NodeName,ApprovedBy,Repo,Branch,Action,Status,HTTPStatus,BackupPath" > ${REPORT_FILE}
 '''
       }
@@ -56,10 +59,10 @@ echo "Timestamp,JobName,BuildNumber,NodeName,ApprovedBy,Repo,Branch,Action,Statu
     stage('Validate All Branches First') {
       steps {
         sh '''
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
-PROTECTED_STATIC=("main" "master" "develop" "prod" "release")
+PROTECTED_STATIC=("main" "master" "develop" "prod")
 MISSING=()
 PROTECTED_HITS=()
 
@@ -78,18 +81,21 @@ while IFS= read -r raw || [ -n "$raw" ]; do
     PROTECTED_HITS+=("$REPO:$BRANCH (default branch)")
   fi
 
-  # Static protected check
+  # Static protection
   for P in "${PROTECTED_STATIC[@]}"; do
     if [ "$BRANCH" = "$P" ]; then
       PROTECTED_HITS+=("$REPO:$BRANCH")
     fi
   done
 
-  if [[ "$BRANCH" == release/* ]]; then
-    PROTECTED_HITS+=("$REPO:$BRANCH")
+  # Pattern protection
+  if [[ "$BRANCH" == release/* ]] || \
+     [[ "$BRANCH" == hotfix/* ]] || \
+     [[ "$BRANCH" == support/* ]]; then
+    PROTECTED_HITS+=("$REPO:$BRANCH (protected pattern)")
   fi
 
-  # Branch existence check
+  # Check branch existence
   STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
@@ -143,7 +149,7 @@ ${params.REPO_BRANCH_INPUT}
       }
       steps {
         sh '''
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
 mkdir -p "${MIRROR_BACKUP_DIR}"
@@ -163,13 +169,14 @@ while IFS= read -r raw || [ -n "$raw" ]; do
       "$TARGET"
   fi
 
-  # Ensure backup exists
   if [ ! -d "$TARGET" ]; then
     echo "❌ Backup verification failed"
     exit 1
   fi
 
 done < <(echo "${REPO_BRANCH_INPUT}")
+
+echo "✅ Backup completed."
 '''
       }
     }
@@ -180,7 +187,7 @@ done < <(echo "${REPO_BRANCH_INPUT}")
       }
       steps {
         sh '''
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
 MODE="${OPERATION_MODE}"
@@ -211,6 +218,7 @@ while IFS= read -r raw || [ -n "$raw" ]; do
       https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
       refs/heads/${BRANCH}:refs/heads/${BRANCH}
     cd - >/dev/null
+
     STATUS_LABEL="RESTORED"
     HTTP_STATUS="200"
   fi
@@ -218,6 +226,8 @@ while IFS= read -r raw || [ -n "$raw" ]; do
   echo "$(date),${JOB_NAME},${BUILD_NUMBER},${NODE_NAME},${APPROVED_BY:-SYSTEM},$REPO,$BRANCH,$MODE,$STATUS_LABEL,$HTTP_STATUS,$TARGET" >> ${REPORT_FILE}
 
 done < <(echo "${REPO_BRANCH_INPUT}")
+
+echo "✅ Operation completed."
 '''
       }
     }
