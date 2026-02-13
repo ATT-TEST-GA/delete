@@ -9,10 +9,11 @@ pipeline {
   }
 
   parameters {
-    booleanParam(
-      name: 'DRY_RUN',
-      defaultValue: true,
-      description: 'TRUE = Validation only. FALSE = Request delete'
+
+    choice(
+      name: 'OPERATION_MODE',
+      choices: ['DRY_RUN', 'BACKUP_ONLY', 'DELETE_ONLY'],
+      description: 'Select operation mode'
     )
 
     text(
@@ -48,25 +49,25 @@ APM0012058-TEST:feature/test
     stage('Initialize Audit Report') {
       steps {
         sh '''
-echo "Timestamp,JobName,BuildNumber,NodeName,ApprovedBy,Repo,Branch,Action,Status,BackupTaken" > ${REPORT_FILE}
+echo "Timestamp,JobName,BuildNumber,NodeName,ApprovedBy,Repo,Branch,Operation,Status" > ${REPORT_FILE}
 '''
       }
     }
 
     stage('Enterprise Validation') {
       steps {
-        sh '''#!/usr/bin/env bash
+        sh(script: '''
 set -euo pipefail
 
-PROTECTED_EXACT=("main" "master" "develop" "dev" "prod" "production" "uat" "qa" "stage" "staging" "head")
+PROTECTED_EXACT=("main" "master" "develop" "dev" "prod" "production" "uat" "qa" "stage" "staging")
 PROTECTED_PREFIX=("release/" "hotfix/" "support/")
 
 declare -A SEEN
 PROTECTED_HITS=()
 MISSING=()
 
-while IFS= read -r raw || [ -n "$raw" ]; do
-  line=$(echo "$raw" | xargs)
+while read line; do
+  line=$(echo "$line" | xargs)
   [ -z "$line" ] && continue
 
   REPO="${line%%:*}"
@@ -94,17 +95,16 @@ while IFS= read -r raw || [ -n "$raw" ]; do
 
   STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
 
   if [ "$STATUS" = "404" ]; then
     MISSING+=("$REPO:$BRANCH")
   fi
 
-done < <(echo "${REPO_BRANCH_INPUT}")
+done <<< "${REPO_BRANCH_INPUT}"
 
 if [ ${#PROTECTED_HITS[@]} -gt 0 ]; then
-  echo "❌ Attempt to delete protected branches:"
+  echo "❌ Protected branches detected:"
   printf '%s\n' "${PROTECTED_HITS[@]}"
   exit 1
 fi
@@ -115,49 +115,32 @@ if [ ${#MISSING[@]} -gt 0 ]; then
   exit 1
 fi
 
-echo "✅ Enterprise validation successful."
-'''
+echo "✅ Validation successful."
+''', shell: '/bin/bash')
       }
     }
 
-    stage('Approval Gate (Governed Decision)') {
+    stage('Approval Gate (For DELETE Only)') {
       when {
-        expression { return !params.DRY_RUN }
+        expression { params.OPERATION_MODE == 'DELETE_ONLY' }
       }
       steps {
         script {
-          def decision = input(
-            message: """PRODUCTION DELETE APPROVAL REQUIRED
-
-${params.REPO_BRANCH_INPUT}
-
-Select action:
-""",
-            ok: 'PROCEED',
-            submitter: env.ALLOWED_APPROVERS,
-            parameters: [
-              choice(
-                name: 'DELETE_MODE',
-                choices: ['BACKUP_AND_DELETE', 'DIRECT_DELETE'],
-                description: 'Select deletion mode'
-              )
-            ]
+          input(
+            message: "Production DELETE approval required",
+            ok: 'APPROVE',
+            submitter: env.ALLOWED_APPROVERS
           )
-
-          env.DELETE_MODE = decision
         }
       }
     }
 
-    stage('Backup (If Selected)') {
+    stage('Backup Execution') {
       when {
-        expression {
-          return !params.DRY_RUN &&
-                 env.DELETE_MODE == 'BACKUP_AND_DELETE'
-        }
+        expression { params.OPERATION_MODE == 'BACKUP_ONLY' }
       }
       steps {
-        sh '''
+        sh(script: '''
 set -euo pipefail
 mkdir -p "${MIRROR_BACKUP_DIR}"
 
@@ -176,23 +159,22 @@ while read line; do
       "$TARGET"
   fi
 
+  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${NODE_NAME},SYSTEM,$REPO,ALL_BRANCHES,BACKUP,SUCCESS" >> ${REPORT_FILE}
+
 done <<< "${REPO_BRANCH_INPUT}"
 
 echo "✅ Backup completed."
-'''
+''', shell: '/bin/bash')
       }
     }
 
-    stage('Delete Execution (With HTTP Handling)') {
+    stage('Delete Execution') {
       when {
-        expression { return !params.DRY_RUN }
+        expression { params.OPERATION_MODE == 'DELETE_ONLY' }
       }
       steps {
-        sh '''
+        sh(script: '''
 set -euo pipefail
-
-BACKUP_STATUS="NO"
-[ "${DELETE_MODE}" = "BACKUP_AND_DELETE" ] && BACKUP_STATUS="YES"
 
 while read line; do
   line=$(echo "$line" | xargs)
@@ -204,28 +186,21 @@ while read line; do
   HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     -X DELETE \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH}")
 
   if [ "$HTTP_CODE" = "204" ]; then
     STATUS="DELETED"
-  elif [ "$HTTP_CODE" = "404" ]; then
-    echo "❌ Branch not found: $REPO:$BRANCH"
-    exit 1
-  elif [ "$HTTP_CODE" = "403" ]; then
-    echo "❌ Permission denied: $REPO:$BRANCH"
-    exit 1
   else
-    echo "❌ GitHub API failed with HTTP $HTTP_CODE for $REPO:$BRANCH"
+    echo "❌ Delete failed ($HTTP_CODE) for $REPO:$BRANCH"
     exit 1
   fi
 
-  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${NODE_NAME},${APPROVED_BY:-SYSTEM},$REPO,$BRANCH,DELETE,${STATUS},${BACKUP_STATUS}" >> ${REPORT_FILE}
+  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${NODE_NAME},SYSTEM,$REPO,$BRANCH,DELETE,${STATUS}" >> ${REPORT_FILE}
 
 done <<< "${REPO_BRANCH_INPUT}"
 
-echo "✅ Production delete completed."
-'''
+echo "✅ Delete completed."
+''', shell: '/bin/bash')
       }
     }
   }
