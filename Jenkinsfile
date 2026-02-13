@@ -30,7 +30,12 @@ pipeline {
     text(
       name: 'REPO_BRANCH_INPUT',
       defaultValue: '',
-      description: '''Enter repo:branch pairs (one per line)'''
+      description: '''Enter repo:branch pairs (one per line)
+
+Example:
+APM0012058-TEST:feature/test1
+APM0014540-INFRASTRUCTURE:bugfix/cleanup
+'''
     )
   }
 
@@ -39,7 +44,6 @@ pipeline {
     GITHUB_ORG        = 'ATT-TEST-GA'
     MIRROR_BACKUP_DIR = '/opt/git-mirror-backups'
     ALLOWED_APPROVERS = 'admin,cloudops,devopslead'
-    REPORT_FILE       = 'branch_operation_audit.csv'
   }
 
   stages {
@@ -62,14 +66,6 @@ pipeline {
       }
     }
 
-    stage('Initialize Audit Report') {
-      steps {
-        sh '''
-echo "Timestamp,JobName,BuildNumber,NodeName,ApprovedBy,Repo,Branch,Action,Status,OperationMode,BackupPath" > ${REPORT_FILE}
-'''
-      }
-    }
-
     stage('Validate All Branches First') {
       steps {
         sh '''#!/usr/bin/env bash
@@ -77,47 +73,50 @@ set -euo pipefail
 
 PROTECTED=("main" "master" "develop" "prod" "release")
 
-MISSING=()
-PROTECTED_HITS=()
+MISSING_BRANCHES=()
+PROTECTED_BRANCHES=()
 
 while IFS= read -r raw || [ -n "$raw" ]; do
+
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
   REPO="${line%%:*}"
   BRANCH="${line##*:}"
 
+  # Protected branch check
   for P in "${PROTECTED[@]}"; do
     if [ "$BRANCH" = "$P" ]; then
-      PROTECTED_HITS+=("$REPO:$BRANCH")
+      PROTECTED_BRANCHES+=("$REPO:$BRANCH")
     fi
   done
 
   if [[ "$BRANCH" == release/* ]]; then
-    PROTECTED_HITS+=("$REPO:$BRANCH")
+    PROTECTED_BRANCHES+=("$REPO:$BRANCH")
   fi
 
+  # Branch existence check
   STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
 
   if [ "$STATUS" = "404" ]; then
-    MISSING+=("$REPO:$BRANCH")
+    MISSING_BRANCHES+=("$REPO:$BRANCH")
   fi
 
 done < <(echo "${REPO_BRANCH_INPUT}")
 
-if [ ${#PROTECTED_HITS[@]} -gt 0 ]; then
-  echo "❌ Protected branches:"
-  printf '%s\n' "${PROTECTED_HITS[@]}"
+if [ ${#PROTECTED_BRANCHES[@]} -gt 0 ]; then
+  echo "❌ Protected branches detected:"
+  printf '%s\n' "${PROTECTED_BRANCHES[@]}"
   exit 1
 fi
 
-if [ ${#MISSING[@]} -gt 0 ]; then
-  echo "❌ Missing branches:"
-  printf '%s\n' "${MISSING[@]}"
+if [ ${#MISSING_BRANCHES[@]} -gt 0 ]; then
+  echo "❌ The following branches do NOT exist:"
+  printf '%s\n' "${MISSING_BRANCHES[@]}"
   exit 1
 fi
 
-echo "✅ Validation successful."
+echo "✅ All branches validated successfully."
 '''
       }
     }
@@ -128,8 +127,8 @@ echo "✅ Validation successful."
       }
       steps {
         script {
-          def approver = input(
-            message: """Approve operation:
+          input(
+            message: """Approve branch operation:
 
 ${params.REPO_BRANCH_INPUT}
 
@@ -137,10 +136,8 @@ DELETE: ${params.ENABLE_DELETE}
 BACKOUT: ${params.ENABLE_BACKOUT}
 """,
             ok: 'APPROVE',
-            submitter: env.ALLOWED_APPROVERS,
-            submitterParameter: 'APPROVED_BY'
+            submitter: env.ALLOWED_APPROVERS
           )
-          env.APPROVED_BY = approver
         }
       }
     }
@@ -175,16 +172,37 @@ done < <(echo "${REPO_BRANCH_INPUT}")
       }
     }
 
-    stage('Delete / Backout Execution') {
+    stage('Delete Branches') {
       when {
-        expression { return !params.DRY_RUN }
+        expression { return !params.DRY_RUN && params.ENABLE_DELETE }
       }
       steps {
         sh '''#!/usr/bin/env bash
 set -euo pipefail
 
-MODE="DELETE"
-[ "${ENABLE_BACKOUT}" = "true" ] && MODE="BACKOUT"
+while IFS= read -r raw || [ -n "$raw" ]; do
+  line=$(echo "$raw" | sed 's/|/:/g' | xargs)
+  REPO="${line%%:*}"
+  BRANCH="${line##*:}"
+
+  curl -s -X DELETE \
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH}"
+
+  echo "Deleted $REPO:$BRANCH"
+
+done < <(echo "${REPO_BRANCH_INPUT}")
+'''
+      }
+    }
+
+    stage('Backout') {
+      when {
+        expression { return !params.DRY_RUN && params.ENABLE_BACKOUT }
+      }
+      steps {
+        sh '''#!/usr/bin/env bash
+set -euo pipefail
 
 while IFS= read -r raw || [ -n "$raw" ]; do
   line=$(echo "$raw" | sed 's/|/:/g' | xargs)
@@ -192,33 +210,19 @@ while IFS= read -r raw || [ -n "$raw" ]; do
   BRANCH="${line##*:}"
   TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
 
-  if [ "$MODE" = "DELETE" ]; then
-    curl -s -X DELETE \
-      -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-      "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH}"
-    STATUS="DELETED"
-  else
-    cd "$TARGET"
-    git push \
-      https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
-      refs/heads/${BRANCH}:refs/heads/${BRANCH}
-    cd - >/dev/null
-    STATUS="RESTORED"
-  fi
+  cd "$TARGET"
 
-  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${NODE_NAME},${APPROVED_BY:-SYSTEM},$REPO,$BRANCH,$MODE,$STATUS,$MODE,$TARGET" >> ${REPORT_FILE}
+  git push \
+    https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
+    refs/heads/${BRANCH}:refs/heads/${BRANCH}
+
+  cd - >/dev/null
+
+  echo "Restored $REPO:$BRANCH"
 
 done < <(echo "${REPO_BRANCH_INPUT}")
 '''
       }
-    }
-  }
-
-  post {
-    always {
-      archiveArtifacts artifacts: '*.csv',
-                       fingerprint: true,
-                       allowEmptyArchive: true
     }
   }
 }
