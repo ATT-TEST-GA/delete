@@ -13,7 +13,17 @@ pipeline {
     text(
       name: 'REPO_BRANCH_INPUT',
       defaultValue: '',
-      description: '''Enter repo:branch pairs (one per line)
+      description: '''
+<span style="color:red; font-weight:bold;">
+⚠ WARNING: This job PERMANENTLY DELETES GitHub branches.
+There is NO recovery unless backups exist.
+Double-check repository and branch names before submitting.
+</span>
+
+<br/><br/>
+
+Enter repo:branch pairs (one per line)
+
 Example:
 APM0012058-TEST:feature/test
 '''
@@ -30,7 +40,7 @@ APM0012058-TEST:feature/test
     GITHUB_TOKEN      = credentials('github-pat')
     GITHUB_ORG        = 'ATT-TEST-GA'
     ALLOWED_APPROVERS = 'admin,cloudops,devopslead'
-    REPORT_FILE       = "GITHUB_BRANCH_DELETE_PROD_${BUILD_NUMBER}.csv"
+    REPORT_FILE       = "GITHUB_BRANCH_DELETE_${BUILD_NUMBER}.csv"
     REPORT_HTML       = "GITHUB_BRANCH_DELETE_REPORT_${BUILD_NUMBER}.html"
   }
 
@@ -182,6 +192,7 @@ echo "✅ Delete completed successfully."
     stage('Generate HTML Report & Send Email') {
       steps {
         script {
+
           def rows = ""
           if (fileExists('deleted_branches.txt')) {
             readFile('deleted_branches.txt').split("\n").each { line ->
@@ -203,17 +214,26 @@ echo "✅ Delete completed successfully."
             }
           }
 
+          def totalDeleted = rows ? rows.count("<tr>") : 0
+
           def htmlBody = """
           <html>
-          <body>
-            <h2>GitHub Branch Delete Audit Report</h2>
-            <p><b>Environment:</b> PROD</p>
+          <body style="font-family: Arial, sans-serif; font-size: 14px;">
+
+            <h2>[GitHub][DELETE] Branch Audit Report</h2>
+
+            <p><b>Platform:</b> GitHub</p>
+            <p><b>Organization:</b> ${env.GITHUB_ORG}</p>
             <p><b>Job:</b> ${env.JOB_NAME}</p>
             <p><b>Build:</b> ${env.BUILD_NUMBER}</p>
+            <p><b>Build URL:</b> <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>
+            <p><b>Operation:</b> Branch Deletion</p>
             <p><b>Approved By:</b> ${env.APPROVED_BY}</p>
-            <p><b>Execution Time:</b> ${new Date()}</p>
+            <p><b>Total Branches Deleted:</b> ${totalDeleted}</p>
 
-            <table border="1" cellpadding="5" cellspacing="0">
+            <br/>
+
+            <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
               <tr style="background-color:#f2f2f2;">
                 <th>Repository</th>
                 <th>Branch</th>
@@ -222,10 +242,16 @@ echo "✅ Delete completed successfully."
                 <th>Job</th>
                 <th>Build</th>
                 <th>Status</th>
-                <th>DeletedAt</th>
+                <th>Deleted At</th>
               </tr>
               ${rows}
             </table>
+
+            <br/>
+            <p style="color: #555;">
+            This is an automated system-generated audit notification.<br/>
+            Please retain this email for compliance and audit purposes.
+            </p>
 
           </body>
           </html>
@@ -235,7 +261,7 @@ echo "✅ Delete completed successfully."
 
           try {
             emailext(
-              subject: "GitHub Branch Delete Audit - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+              subject: "[GitHub][DELETE] Branch Audit Report | ${env.GITHUB_ORG} | Build #${env.BUILD_NUMBER}",
               body: htmlBody,
               mimeType: 'text/html',
               to: params.EMAIL_TO,
@@ -243,7 +269,7 @@ echo "✅ Delete completed successfully."
             )
             echo "📧 Email sent successfully."
           } catch (err) {
-            echo "⚠ SMTP not configured. HTML report available in artifacts."
+            echo "⚠ SMTP not configured. HTML report archived."
           }
         }
       }
