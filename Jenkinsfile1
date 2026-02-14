@@ -130,16 +130,11 @@ echo "✅ Enterprise validation successful."
     }
 
     stage('Approval Gate (DELETE Only)') {
-      when {
-        expression { params.OPERATION_MODE == 'DELETE' }
-      }
+      when { expression { params.OPERATION_MODE == 'DELETE' } }
       steps {
         script {
           def approver = input(
-            message: """🚨 GitHub Branch DELETE Approval Required
-
-${params.REPO_BRANCH_INPUT}
-""",
+            message: "🚨 GitHub Branch DELETE Approval Required\n\n${params.REPO_BRANCH_INPUT}",
             ok: 'APPROVE DELETE',
             submitter: env.ALLOWED_APPROVERS,
             submitterParameter: 'APPROVED_BY'
@@ -150,9 +145,7 @@ ${params.REPO_BRANCH_INPUT}
     }
 
     stage('Delete Execution') {
-      when {
-        expression { params.OPERATION_MODE == 'DELETE' }
-      }
+      when { expression { params.OPERATION_MODE == 'DELETE' } }
       steps {
         sh '''
 set -eu
@@ -185,13 +178,11 @@ while read line; do
 done <<EOF
 ${REPO_BRANCH_INPUT}
 EOF
-
-echo "✅ Delete completed successfully."
 '''
       }
     }
 
-    stage('Generate HTML Report & Send Email') {
+    stage('Generate Report & Notify') {
       steps {
         script {
 
@@ -233,12 +224,9 @@ echo "✅ Delete completed successfully."
             <p><b>Operation Mode:</b> ${params.OPERATION_MODE}</p>
             <p><b>Approved By:</b> ${env.APPROVED_BY ?: "N/A"}</p>
             <p><b>Total Branches Deleted:</b> ${count}</p>
-            <p><b>Execution Time:</b> ${new Date()}</p>
-
-            <br/>
 
             <table border="1" cellpadding="5" cellspacing="0">
-              <tr style="background-color:#f2f2f2;">
+              <tr>
                 <th>Repository</th>
                 <th>Branch</th>
                 <th>Operation</th>
@@ -251,7 +239,6 @@ echo "✅ Delete completed successfully."
               ${rows ?: "<tr><td colspan='8'>No branches deleted (DRY_RUN mode)</td></tr>"}
             </table>
 
-            <br/>
             <p>This is an automated system-generated audit notification.</p>
 
           </body>
@@ -262,13 +249,12 @@ echo "✅ Delete completed successfully."
 
           try {
             emailext(
-              subject: "[GitHub][${params.OPERATION_MODE}] Branch Audit - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+              subject: "[GitHub][${params.OPERATION_MODE}] Branch Audit Report | ${env.GITHUB_ORG} | Build #${env.BUILD_NUMBER} | ${count} Branch(es)",
               body: htmlBody,
               mimeType: 'text/html',
               to: params.EMAIL_TO,
               attachmentsPattern: "${env.REPORT_FILE}"
             )
-            echo "📧 Email sent successfully."
           } catch (err) {
             echo "⚠ SMTP not configured. HTML report available in artifacts."
           }
