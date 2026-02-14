@@ -23,13 +23,19 @@ Example:
 APM0012058-TEST:feature/test
 '''
     )
+
+    string(
+      name: 'EMAIL_TO',
+      defaultValue: '',
+      description: 'Optional email recipients (comma separated)'
+    )
   }
 
   environment {
     GITHUB_TOKEN      = credentials('github-pat')
     GITHUB_ORG        = 'ATT-TEST-GA'
     ALLOWED_APPROVERS = 'admin,cloudops,devopslead'
-    REPORT_FILE       = 'branch_operation_audit.csv'
+    REPORT_FILE       = "ATT_GITHUB_BRANCH_DELETE_AUDIT_${JOB_NAME}_${BUILD_NUMBER}.csv"
   }
 
   stages {
@@ -71,7 +77,7 @@ while read line; do
   BRANCH=${line##*:}
   BRANCH_LOWER=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]')
 
-  # Fetch default branch
+  # Get default branch
   DEFAULT_BRANCH=$(curl -s \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     https://api.github.com/repos/${GITHUB_ORG}/${REPO} \
@@ -172,7 +178,7 @@ while read line; do
     echo "❌ Permission denied: $REPO:$BRANCH"
     exit 1
   elif [ "$HTTP_CODE" = "422" ]; then
-    echo "❌ GitHub rejected deletion (422). Possibly protected or default branch: $REPO:$BRANCH"
+    echo "❌ GitHub rejected deletion (422). Possibly protected/default branch: $REPO:$BRANCH"
     exit 1
   else
     echo "❌ GitHub API failed with HTTP $HTTP_CODE for $REPO:$BRANCH"
@@ -189,11 +195,48 @@ echo "✅ Delete completed successfully."
 '''
       }
     }
+
+    stage('Send Email Notification') {
+      when {
+        expression { params.EMAIL_TO?.trim() }
+      }
+      steps {
+        script {
+          try {
+            def htmlBody = """
+            <html>
+            <body>
+              <h2>GitHub Branch Delete Report</h2>
+              <p><b>Job:</b> ${env.JOB_NAME}</p>
+              <p><b>Build:</b> ${env.BUILD_NUMBER}</p>
+              <p><b>Operation:</b> ${params.OPERATION_MODE}</p>
+              <pre>${params.REPO_BRANCH_INPUT}</pre>
+              <p>Audit file attached.</p>
+            </body>
+            </html>
+            """
+
+            emailext(
+              subject: "GitHub Branch Delete Report - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+              body: htmlBody,
+              mimeType: 'text/html',
+              to: params.EMAIL_TO,
+              attachmentsPattern: "${env.REPORT_FILE}"
+            )
+
+            echo "📧 Email sent successfully."
+
+          } catch (err) {
+            echo "⚠ Email failed but pipeline will not fail: ${err}"
+          }
+        }
+      }
+    }
   }
 
   post {
     always {
-      archiveArtifacts artifacts: '*.csv',
+      archiveArtifacts artifacts: "${env.REPORT_FILE}",
                        fingerprint: true,
                        allowEmptyArchive: true
     }
