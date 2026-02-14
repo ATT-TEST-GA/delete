@@ -34,7 +34,7 @@ APM0012058-TEST:feature/test
     GITHUB_TOKEN      = credentials('github-pat')
     GITHUB_ORG        = 'ATT-TEST-GA'
     ALLOWED_APPROVERS = 'admin,cloudops,devopslead'
-    REPORT_FILE       = "GITHUB_BRANCH_DELETE_${BUILD_NUMBER}.csv"
+    REPORT_FILE       = "GITHUB_BRANCH_DELETE_REPORT_${BUILD_NUMBER}.csv"
     REPORT_HTML       = "GITHUB_BRANCH_DELETE_REPORT_${BUILD_NUMBER}.html"
   }
 
