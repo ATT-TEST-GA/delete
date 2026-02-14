@@ -9,7 +9,6 @@ pipeline {
   }
 
   parameters {
-
     choice(
       name: 'OPERATION_MODE',
       choices: ['DRY_RUN', 'DELETE'],
@@ -55,7 +54,8 @@ echo "Timestamp,JobName,BuildNumber,NodeName,ApprovedBy,Repo,Branch,Operation,St
 
     stage('Enterprise Validation') {
       steps {
-        sh(script: '''
+        sh '''
+#!/bin/bash
 set -euo pipefail
 
 PROTECTED_EXACT=("main" "master" "develop" "dev" "prod" "production" "uat" "qa" "stage" "staging")
@@ -80,14 +80,12 @@ while read line; do
 
   BRANCH_LOWER=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]')
 
-  # Protected exact
   for P in "${PROTECTED_EXACT[@]}"; do
     if [[ "$BRANCH_LOWER" == "$P" ]]; then
       PROTECTED_HITS+=("$REPO:$BRANCH")
     fi
   done
 
-  # Protected prefix
   for P in "${PROTECTED_PREFIX[@]}"; do
     if [[ "$BRANCH_LOWER" == ${P}* ]]; then
       PROTECTED_HITS+=("$REPO:$BRANCH")
@@ -96,6 +94,7 @@ while read line; do
 
   STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
 
   if [ "$STATUS" = "404" ]; then
@@ -116,8 +115,8 @@ if [ ${#MISSING[@]} -gt 0 ]; then
   exit 1
 fi
 
-echo "✅ Validation successful."
-''', shell: '/bin/bash')
+echo "✅ Enterprise validation successful."
+'''
       }
     }
 
@@ -144,7 +143,8 @@ ${params.REPO_BRANCH_INPUT}
         expression { params.OPERATION_MODE == 'DELETE' }
       }
       steps {
-        sh(script: '''
+        sh '''
+#!/bin/bash
 set -euo pipefail
 
 while read line; do
@@ -177,8 +177,8 @@ while read line; do
 
 done <<< "${REPO_BRANCH_INPUT}"
 
-echo "✅ Delete completed."
-''', shell: '/bin/bash')
+echo "✅ Delete completed successfully."
+'''
       }
     }
   }
