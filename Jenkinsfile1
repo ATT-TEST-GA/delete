@@ -36,7 +36,7 @@ APM0012058-TEST:feature/test
     GITHUB_TOKEN      = credentials('github-pat')
     GITHUB_ORG        = 'ATT-TEST-GA'
     ALLOWED_APPROVERS = 'admin,cloudops,devopslead'
-    REPORT_FILE       = "GITHUB_BRANCH_DELETE_PROD_${BUILD_NUMBER}.csv"
+    REPORT_FILE       = "GITHUB_BRANCH_DELETE_AUDIT_${BUILD_NUMBER}.csv"
     REPORT_HTML       = "GITHUB_BRANCH_DELETE_REPORT_${BUILD_NUMBER}.html"
   }
 
@@ -136,7 +136,7 @@ echo "✅ Enterprise validation successful."
       steps {
         script {
           def approver = input(
-            message: """🚨 PRODUCTION DELETE APPROVAL REQUIRED
+            message: """🚨 GitHub Branch DELETE Approval Required
 
 ${params.REPO_BRANCH_INPUT}
 """,
@@ -194,11 +194,15 @@ echo "✅ Delete completed successfully."
     stage('Generate HTML Report & Send Email') {
       steps {
         script {
+
           def rows = ""
+          def count = 0
+
           if (fileExists('deleted_branches.txt')) {
             def deletedBranches = readFile('deleted_branches.txt')
             deletedBranches.split("\n").each { line ->
               if (line?.trim()) {
+                count++
                 def parts = line.split(",")
                 rows += """
                 <tr>
@@ -221,11 +225,14 @@ echo "✅ Delete completed successfully."
           <body>
             <h2>GitHub Branch Delete Audit Report</h2>
 
-            <p><b>Environment:</b> PROD</p>
+            <p><b>Platform:</b> GitHub</p>
+            <p><b>Organization:</b> ${env.GITHUB_ORG}</p>
             <p><b>Job:</b> ${env.JOB_NAME}</p>
             <p><b>Build:</b> ${env.BUILD_NUMBER}</p>
+            <p><b>Build URL:</b> <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>
             <p><b>Operation Mode:</b> ${params.OPERATION_MODE}</p>
             <p><b>Approved By:</b> ${env.APPROVED_BY ?: "N/A"}</p>
+            <p><b>Total Branches Deleted:</b> ${count}</p>
             <p><b>Execution Time:</b> ${new Date()}</p>
 
             <br/>
@@ -244,6 +251,9 @@ echo "✅ Delete completed successfully."
               ${rows ?: "<tr><td colspan='8'>No branches deleted (DRY_RUN mode)</td></tr>"}
             </table>
 
+            <br/>
+            <p>This is an automated system-generated audit notification.</p>
+
           </body>
           </html>
           """
@@ -252,7 +262,7 @@ echo "✅ Delete completed successfully."
 
           try {
             emailext(
-              subject: "GitHub Branch Delete Audit - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+              subject: "[GitHub][${params.OPERATION_MODE}] Branch Audit - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
               body: htmlBody,
               mimeType: 'text/html',
               to: params.EMAIL_TO,
