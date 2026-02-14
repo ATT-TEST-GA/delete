@@ -55,63 +55,53 @@ echo "Timestamp,JobName,BuildNumber,NodeName,ApprovedBy,Repo,Branch,Operation,St
     stage('Enterprise Validation') {
       steps {
         sh '''
-#!/bin/bash
-set -euo pipefail
+set -eu
 
-PROTECTED_EXACT=("main" "master" "develop" "dev" "prod" "production" "uat" "qa" "stage" "staging")
-PROTECTED_PREFIX=("release/" "hotfix/" "support/")
+PROTECTED_EXACT="main master develop dev prod production uat qa stage staging"
+PROTECTED_PREFIX="release/ hotfix/ support/"
 
-declare -A SEEN
-PROTECTED_HITS=()
-MISSING=()
+PROTECTED_HITS=""
+MISSING=""
 
 while read line; do
   line=$(echo "$line" | xargs)
   [ -z "$line" ] && continue
 
-  REPO="${line%%:*}"
-  BRANCH="${line##*:}"
-  KEY="${REPO}:${BRANCH}"
-
-  if [[ -n "${SEEN[$KEY]:-}" ]]; then
-    continue
-  fi
-  SEEN[$KEY]=1
-
+  REPO=${line%%:*}
+  BRANCH=${line##*:}
   BRANCH_LOWER=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]')
 
-  for P in "${PROTECTED_EXACT[@]}"; do
-    if [[ "$BRANCH_LOWER" == "$P" ]]; then
-      PROTECTED_HITS+=("$REPO:$BRANCH")
+  for P in $PROTECTED_EXACT; do
+    if [ "$BRANCH_LOWER" = "$P" ]; then
+      PROTECTED_HITS="$PROTECTED_HITS $REPO:$BRANCH"
     fi
   done
 
-  for P in "${PROTECTED_PREFIX[@]}"; do
-    if [[ "$BRANCH_LOWER" == ${P}* ]]; then
-      PROTECTED_HITS+=("$REPO:$BRANCH")
-    fi
+  for P in $PROTECTED_PREFIX; do
+    case "$BRANCH_LOWER" in
+      $P*) PROTECTED_HITS="$PROTECTED_HITS $REPO:$BRANCH" ;;
+    esac
   done
 
   STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH}")
 
   if [ "$STATUS" = "404" ]; then
-    MISSING+=("$REPO:$BRANCH")
+    MISSING="$MISSING $REPO:$BRANCH"
   fi
 
-done <<< "${REPO_BRANCH_INPUT}"
+done <<EOF
+${REPO_BRANCH_INPUT}
+EOF
 
-if [ ${#PROTECTED_HITS[@]} -gt 0 ]; then
-  echo "❌ Protected branches detected:"
-  printf '%s\n' "${PROTECTED_HITS[@]}"
+if [ -n "$PROTECTED_HITS" ]; then
+  echo "❌ Protected branches detected:$PROTECTED_HITS"
   exit 1
 fi
 
-if [ ${#MISSING[@]} -gt 0 ]; then
-  echo "❌ Missing branches detected:"
-  printf '%s\n' "${MISSING[@]}"
+if [ -n "$MISSING" ]; then
+  echo "❌ Missing branches detected:$MISSING"
   exit 1
 fi
 
@@ -144,38 +134,32 @@ ${params.REPO_BRANCH_INPUT}
       }
       steps {
         sh '''
-#!/bin/bash
-set -euo pipefail
+set -eu
 
 while read line; do
   line=$(echo "$line" | xargs)
   [ -z "$line" ] && continue
 
-  REPO="${line%%:*}"
-  BRANCH="${line##*:}"
+  REPO=${line%%:*}
+  BRANCH=${line##*:}
 
   HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     -X DELETE \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH}")
 
   if [ "$HTTP_CODE" = "204" ]; then
     STATUS="DELETED"
-  elif [ "$HTTP_CODE" = "404" ]; then
-    echo "❌ Branch not found: $REPO:$BRANCH"
-    exit 1
-  elif [ "$HTTP_CODE" = "403" ]; then
-    echo "❌ Permission denied: $REPO:$BRANCH"
-    exit 1
   else
-    echo "❌ GitHub API failed with HTTP $HTTP_CODE for $REPO:$BRANCH"
+    echo "❌ Delete failed ($HTTP_CODE) for $REPO:$BRANCH"
     exit 1
   fi
 
   echo "$(date),${JOB_NAME},${BUILD_NUMBER},${NODE_NAME},SYSTEM,$REPO,$BRANCH,DELETE,${STATUS}" >> ${REPORT_FILE}
 
-done <<< "${REPO_BRANCH_INPUT}"
+done <<EOF
+${REPO_BRANCH_INPUT}
+EOF
 
 echo "✅ Delete completed successfully."
 '''
