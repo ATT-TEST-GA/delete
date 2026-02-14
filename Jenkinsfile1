@@ -9,7 +9,6 @@ pipeline {
   }
 
   parameters {
-
     choice(
       name: 'OPERATION_MODE',
       choices: ['DRY_RUN', 'DELETE'],
@@ -46,7 +45,7 @@ APM0012058-TEST:feature/test
       steps {
         script {
           if (!params.REPO_BRANCH_INPUT?.trim()) {
-            error('❌ REPO_BRANCH_INPUT cannot be empty')
+            error('REPO_BRANCH_INPUT cannot be empty')
           }
         }
       }
@@ -54,30 +53,30 @@ APM0012058-TEST:feature/test
 
     stage('Initialize Audit CSV') {
       steps {
-        sh '''
+        sh """
 echo "Repository,Branch,Operation,ApprovedBy,Job,Build,Status,DeletedAt" > ${REPORT_FILE}
-'''
+"""
       }
     }
 
-    stage('Enterprise Validation') {
+    stage('Validate Branches') {
       steps {
-        sh '''
+        sh """
 set -eu
 
 while read line; do
-  line=$(echo "$line" | xargs)
-  [ -z "$line" ] && continue
+  line=\$(echo "\$line" | xargs)
+  [ -z "\$line" ] && continue
 
-  REPO=${line%%:*}
-  BRANCH=${line##*:}
+  REPO=\${line%%:*}
+  BRANCH=\${line##*:}
 
-  STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH})
+  STATUS=\$(curl -s -o /dev/null -w "%{http_code}" \\
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" \\
+    https://api.github.com/repos/${GITHUB_ORG}/\${REPO}/git/ref/heads/\${BRANCH})
 
-  if [ "$STATUS" = "404" ]; then
-    echo "❌ Missing branch: $REPO:$BRANCH"
+  if [ "\$STATUS" = "404" ]; then
+    echo "Missing branch: \$REPO:\$BRANCH"
     exit 1
   fi
 
@@ -85,17 +84,19 @@ done <<EOF
 ${REPO_BRANCH_INPUT}
 EOF
 
-echo "✅ Validation successful."
-'''
+echo "Validation successful"
+"""
       }
     }
 
-    stage('Approval Gate (DELETE Only)') {
-      when { expression { params.OPERATION_MODE == 'DELETE' } }
+    stage('Approval Gate') {
+      when {
+        expression { params.OPERATION_MODE == 'DELETE' }
+      }
       steps {
         script {
           def approver = input(
-            message: "🚨 GitHub Branch DELETE Approval Required\n\n${params.REPO_BRANCH_INPUT}",
+            message: "Approve GitHub Branch DELETE:\n\n${params.REPO_BRANCH_INPUT}",
             ok: 'APPROVE DELETE',
             submitter: env.ALLOWED_APPROVERS,
             submitterParameter: 'APPROVED_BY'
@@ -105,44 +106,46 @@ echo "✅ Validation successful."
       }
     }
 
-    stage('Delete Execution') {
-      when { expression { params.OPERATION_MODE == 'DELETE' } }
+    stage('Delete Branches') {
+      when {
+        expression { params.OPERATION_MODE == 'DELETE' }
+      }
       steps {
-        sh '''
+        sh """
 set -eu
 
-DELETED_LIST_FILE="deleted_branches.txt"
-> $DELETED_LIST_FILE
+DELETED_FILE="deleted_branches.txt"
+> \$DELETED_FILE
 
 while read line; do
-  line=$(echo "$line" | xargs)
-  [ -z "$line" ] && continue
+  line=\$(echo "\$line" | xargs)
+  [ -z "\$line" ] && continue
 
-  REPO=${line%%:*}
-  BRANCH=${line##*:}
+  REPO=\${line%%:*}
+  BRANCH=\${line##*:}
 
-  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X DELETE \
-    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH})
+  HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" \\
+    -X DELETE \\
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" \\
+    https://api.github.com/repos/${GITHUB_ORG}/\${REPO}/git/refs/heads/\${BRANCH})
 
-  if [ "$HTTP_CODE" = "204" ]; then
-    DELETE_TIME=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "$REPO,$BRANCH,DELETE,${APPROVED_BY:-SYSTEM},${JOB_NAME},${BUILD_NUMBER},DELETED,$DELETE_TIME" >> ${REPORT_FILE}
-    echo "$REPO,$BRANCH,DELETE,${APPROVED_BY:-SYSTEM},${JOB_NAME},${BUILD_NUMBER},DELETED,$DELETE_TIME" >> $DELETED_LIST_FILE
+  if [ "\$HTTP_CODE" = "204" ]; then
+    TIME=\$(date '+%Y-%m-%d %H:%M:%S')
+    echo "\$REPO,\$BRANCH,DELETE,\${APPROVED_BY:-SYSTEM},${JOB_NAME},${BUILD_NUMBER},DELETED,\$TIME" >> ${REPORT_FILE}
+    echo "\$REPO,\$BRANCH,\$TIME" >> \$DELETED_FILE
   else
-    echo "❌ Delete failed ($HTTP_CODE) for $REPO:$BRANCH"
+    echo "Delete failed (\$HTTP_CODE) for \$REPO:\$BRANCH"
     exit 1
   fi
 
 done <<EOF
 ${REPO_BRANCH_INPUT}
 EOF
-'''
+"""
       }
     }
 
-    stage('Generate Report & Notify') {
+    stage('Generate HTML Report & Notify') {
       steps {
         script {
 
@@ -150,84 +153,58 @@ EOF
           def count = 0
 
           if (fileExists('deleted_branches.txt')) {
-            def deletedBranches = readFile('deleted_branches.txt')
-            deletedBranches.split("\n").each { line ->
-              if (line?.trim()) {
+            def lines = readFile('deleted_branches.txt').split("\n")
+            lines.each { l ->
+              if (l.trim()) {
                 count++
-                def parts = line.split(",")
-                rows += """
-                <tr>
-                  <td>${parts[0]}</td>
-                  <td>${parts[1]}</td>
-                  <td>${parts[2]}</td>
-                  <td>${parts[3]}</td>
-                  <td>${parts[4]}</td>
-                  <td>${parts[5]}</td>
-                  <td>${parts[6]}</td>
-                  <td>${parts[7]}</td>
-                </tr>
-                """
+                def parts = l.split(",")
+                rows += "<tr><td>${parts[0]}</td><td>${parts[1]}</td><td>${parts[2]}</td></tr>"
               }
             }
           }
 
-          def modeColor = params.OPERATION_MODE == 'DELETE' ? "#e74c3c" : "#f39c12"
-          def dryNote = params.OPERATION_MODE == 'DRY_RUN' ? 
-                        "<p style='color:#f39c12;'><b>No deletion performed. This was a DRY RUN.</b></p>" : ""
+          def html = """
+<html>
+<body style="font-family:Arial;">
+<h2>GitHub Branch Audit Report</h2>
+<p><b>Organization:</b> ${env.GITHUB_ORG}</p>
+<p><b>Job:</b> ${env.JOB_NAME}</p>
+<p><b>Build:</b> ${env.BUILD_NUMBER}</p>
+<p><b>Operation Mode:</b> ${params.OPERATION_MODE}</p>
+<p><b>Approved By:</b> ${env.APPROVED_BY ?: "N/A"}</p>
+<p><b>Total Deleted:</b> ${count}</p>
+<table border="1" cellpadding="5" cellspacing="0">
+<tr><th>Repository</th><th>Branch</th><th>DeletedAt</th></tr>
+${rows ?: "<tr><td colspan='3'>No branches deleted</td></tr>"}
+</table>
+</body>
+</html>
+"""
 
-          def htmlBody = """
-          <html>
-          <body style="font-family: Arial, sans-serif;">
-
-            <h2 style="color:#2c3e50;">GitHub Branch Audit Report</h2>
-
-            <p><b>Platform:</b> GitHub</p>
-            <p><b>Organization:</b> ${env.GITHUB_ORG}</p>
-            <p><b>Job:</b> ${env.JOB_NAME}</p>
-            <p><b>Build:</b> ${env.BUILD_NUMBER}</p>
-            <p><b>Build URL:</b> <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>
-            <p><b>Operation Mode:</b> 
-              <span style="color:${modeColor};font-weight:bold;">
-                ${params.OPERATION_MODE}
-              </span>
-            </p>
-            <p><b>Approved By:</b> ${env.APPROVED_BY ?: "N/A"}</p>
-            <p><b>Total Branches Deleted:</b> ${count}</p>
-
-            ${dryNote}
-
-            <br/>
-
-            <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
-              <tr style="background-color:#f2f2f2;">
-                <th>Repository</th>
-                <th>Branch</th>
-                <th>Operation</th>
-                <th>Approved By</th>
-                <th>Job</th>
-                <th>Build</th>
-                <th>Status</th>
-                <th>DeletedAt</th>
-              </tr>
-              ${rows ?: "<tr><td colspan='8'>No branches deleted</td></tr>"}
-            </table>
-
-            <br/>
-            <p style="font-size:12px;color:gray;">
-              This is an automated system-generated audit notification from Jenkins.
-            </p>
-
-          </body>
-          </html>
-          """
-
-          writeFile file: env.REPORT_HTML, text: htmlBody
+          writeFile file: env.REPORT_HTML, text: html
 
           try {
             emailext(
               subject: "[GitHub][${params.OPERATION_MODE}] Branch Audit Report | ${env.GITHUB_ORG} | Build #${env.BUILD_NUMBER}",
-              body: htmlBody,
+              body: html,
               mimeType: 'text/html',
               to: params.EMAIL_TO,
               attachmentsPattern: "${env.REPORT_FILE}"
             )
+          } catch (err) {
+            echo "SMTP not configured. HTML report archived."
+          }
+        }
+      }
+    }
+
+  }
+
+  post {
+    always {
+      archiveArtifacts artifacts: "${env.REPORT_FILE},${env.REPORT_HTML}",
+        fingerprint: true,
+        allowEmptyArchive: true
+    }
+  }
+}
