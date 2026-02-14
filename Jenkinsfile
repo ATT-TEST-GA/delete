@@ -12,7 +12,7 @@ pipeline {
 
     choice(
       name: 'OPERATION_MODE',
-      choices: ['DRY_RUN', 'BACKUP_ONLY', 'DELETE_ONLY'],
+      choices: ['DRY_RUN', 'DELETE'],
       description: 'Select operation mode'
     )
 
@@ -29,7 +29,6 @@ APM0012058-TEST:feature/test
   environment {
     GITHUB_TOKEN      = credentials('github-pat')
     GITHUB_ORG        = 'ATT-TEST-GA'
-    MIRROR_BACKUP_DIR = '/opt/git-mirror-backups'
     ALLOWED_APPROVERS = 'admin,cloudops,devopslead'
     REPORT_FILE       = 'branch_operation_audit.csv'
   }
@@ -81,12 +80,14 @@ while read line; do
 
   BRANCH_LOWER=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]')
 
+  # Protected exact
   for P in "${PROTECTED_EXACT[@]}"; do
     if [[ "$BRANCH_LOWER" == "$P" ]]; then
       PROTECTED_HITS+=("$REPO:$BRANCH")
     fi
   done
 
+  # Protected prefix
   for P in "${PROTECTED_PREFIX[@]}"; do
     if [[ "$BRANCH_LOWER" == ${P}* ]]; then
       PROTECTED_HITS+=("$REPO:$BRANCH")
@@ -120,57 +121,27 @@ echo "✅ Validation successful."
       }
     }
 
-    stage('Approval Gate (For DELETE Only)') {
+    stage('Approval Gate (DELETE Only)') {
       when {
-        expression { params.OPERATION_MODE == 'DELETE_ONLY' }
+        expression { params.OPERATION_MODE == 'DELETE' }
       }
       steps {
         script {
           input(
-            message: "Production DELETE approval required",
-            ok: 'APPROVE',
+            message: """PRODUCTION DELETE APPROVAL REQUIRED
+
+${params.REPO_BRANCH_INPUT}
+""",
+            ok: 'APPROVE DELETE',
             submitter: env.ALLOWED_APPROVERS
           )
         }
       }
     }
 
-    stage('Backup Execution') {
-      when {
-        expression { params.OPERATION_MODE == 'BACKUP_ONLY' }
-      }
-      steps {
-        sh(script: '''
-set -euo pipefail
-mkdir -p "${MIRROR_BACKUP_DIR}"
-
-while read line; do
-  line=$(echo "$line" | xargs)
-  [ -z "$line" ] && continue
-
-  REPO="${line%%:*}"
-  TARGET="${MIRROR_BACKUP_DIR}/${REPO}.git"
-
-  if [ -d "$TARGET" ]; then
-    cd "$TARGET" && git remote update && cd - >/dev/null
-  else
-    git clone --mirror \
-      https://${GITHUB_TOKEN}@github.com/${GITHUB_ORG}/${REPO}.git \
-      "$TARGET"
-  fi
-
-  echo "$(date),${JOB_NAME},${BUILD_NUMBER},${NODE_NAME},SYSTEM,$REPO,ALL_BRANCHES,BACKUP,SUCCESS" >> ${REPORT_FILE}
-
-done <<< "${REPO_BRANCH_INPUT}"
-
-echo "✅ Backup completed."
-''', shell: '/bin/bash')
-      }
-    }
-
     stage('Delete Execution') {
       when {
-        expression { params.OPERATION_MODE == 'DELETE_ONLY' }
+        expression { params.OPERATION_MODE == 'DELETE' }
       }
       steps {
         sh(script: '''
@@ -186,12 +157,19 @@ while read line; do
   HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     -X DELETE \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH}")
 
   if [ "$HTTP_CODE" = "204" ]; then
     STATUS="DELETED"
+  elif [ "$HTTP_CODE" = "404" ]; then
+    echo "❌ Branch not found: $REPO:$BRANCH"
+    exit 1
+  elif [ "$HTTP_CODE" = "403" ]; then
+    echo "❌ Permission denied: $REPO:$BRANCH"
+    exit 1
   else
-    echo "❌ Delete failed ($HTTP_CODE) for $REPO:$BRANCH"
+    echo "❌ GitHub API failed with HTTP $HTTP_CODE for $REPO:$BRANCH"
     exit 1
   fi
 
