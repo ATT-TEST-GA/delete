@@ -55,7 +55,7 @@ APM0012058-TEST:feature/test
     stage('Initialize Audit CSV') {
       steps {
         sh '''
-echo "Timestamp,Repository,Branch,Operation,ApprovedBy,Job,Build,Status" > ${REPORT_FILE}
+echo "Repository,Branch,Operation,ApprovedBy,Job,Build,Status,DeletedAt" > ${REPORT_FILE}
 '''
       }
     }
@@ -174,9 +174,9 @@ while read line; do
     https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH})
 
   if [ "$HTTP_CODE" = "204" ]; then
-    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "$TIMESTAMP,$REPO,$BRANCH,DELETE,${APPROVED_BY:-SYSTEM},${JOB_NAME},${BUILD_NUMBER},DELETED" >> ${REPORT_FILE}
-    echo "$TIMESTAMP,$REPO,$BRANCH,DELETE,${APPROVED_BY:-SYSTEM},${JOB_NAME},${BUILD_NUMBER},DELETED" >> $DELETED_LIST_FILE
+    DELETE_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "$REPO,$BRANCH,DELETE,${APPROVED_BY:-SYSTEM},${JOB_NAME},${BUILD_NUMBER},DELETED,$DELETE_TIME" >> ${REPORT_FILE}
+    echo "$REPO,$BRANCH,DELETE,${APPROVED_BY:-SYSTEM},${JOB_NAME},${BUILD_NUMBER},DELETED,$DELETE_TIME" >> $DELETED_LIST_FILE
   else
     echo "❌ Delete failed ($HTTP_CODE) for $REPO:$BRANCH"
     exit 1
@@ -194,54 +194,63 @@ echo "✅ Delete completed successfully."
     stage('Generate HTML Report & Send Email') {
       steps {
         script {
-          try {
-
-            def rows = ""
-            if (fileExists('deleted_branches.txt')) {
-              def deletedBranches = readFile('deleted_branches.txt')
-              deletedBranches.split("\n").each { line ->
-                if (line?.trim()) {
-                  def parts = line.split(",")
-                  rows += """
-                  <tr>
-                    <td>${parts[0]}</td>
-                    <td>${parts[1]}</td>
-                    <td>${parts[2]}</td>
-                    <td>${parts[3]}</td>
-                    <td>${parts[4]}</td>
-                    <td>${parts[5]}</td>
-                    <td>${parts[6]}</td>
-                    <td>${parts[7]}</td>
-                  </tr>
-                  """
-                }
+          def rows = ""
+          if (fileExists('deleted_branches.txt')) {
+            def deletedBranches = readFile('deleted_branches.txt')
+            deletedBranches.split("\n").each { line ->
+              if (line?.trim()) {
+                def parts = line.split(",")
+                rows += """
+                <tr>
+                  <td>${parts[0]}</td>
+                  <td>${parts[1]}</td>
+                  <td>${parts[2]}</td>
+                  <td>${parts[3]}</td>
+                  <td>${parts[4]}</td>
+                  <td>${parts[5]}</td>
+                  <td>${parts[6]}</td>
+                  <td>${parts[7]}</td>
+                </tr>
+                """
               }
             }
+          }
 
-            def htmlBody = """
-            <html>
-            <body>
-              <h2>GitHub Branch Delete Audit Report</h2>
+          def htmlBody = """
+          <html>
+          <body>
+            <h2>GitHub Branch Delete Audit Report</h2>
 
-              <table border="1" cellpadding="5" cellspacing="0">
-                <tr style="background-color:#f2f2f2;">
-                  <th>Timestamp</th>
-                  <th>Repository</th>
-                  <th>Branch</th>
-                  <th>Operation</th>
-                  <th>Approved By</th>
-                  <th>Job</th>
-                  <th>Build</th>
-                  <th>Status</th>
-                </tr>
-                ${rows ?: "<tr><td colspan='8'>No branches deleted (DRY_RUN mode)</td></tr>"}
-              </table>
-            </body>
-            </html>
-            """
+            <p><b>Environment:</b> PROD</p>
+            <p><b>Job:</b> ${env.JOB_NAME}</p>
+            <p><b>Build:</b> ${env.BUILD_NUMBER}</p>
+            <p><b>Operation Mode:</b> ${params.OPERATION_MODE}</p>
+            <p><b>Approved By:</b> ${env.APPROVED_BY ?: "N/A"}</p>
+            <p><b>Execution Time:</b> ${new Date()}</p>
 
-            writeFile file: env.REPORT_HTML, text: htmlBody
+            <br/>
 
+            <table border="1" cellpadding="5" cellspacing="0">
+              <tr style="background-color:#f2f2f2;">
+                <th>Repository</th>
+                <th>Branch</th>
+                <th>Operation</th>
+                <th>Approved By</th>
+                <th>Job</th>
+                <th>Build</th>
+                <th>Status</th>
+                <th>DeletedAt</th>
+              </tr>
+              ${rows ?: "<tr><td colspan='8'>No branches deleted (DRY_RUN mode)</td></tr>"}
+            </table>
+
+          </body>
+          </html>
+          """
+
+          writeFile file: env.REPORT_HTML, text: htmlBody
+
+          try {
             emailext(
               subject: "GitHub Branch Delete Audit - ${env.JOB_NAME} #${env.BUILD_NUMBER}",
               body: htmlBody,
@@ -249,11 +258,9 @@ echo "✅ Delete completed successfully."
               to: params.EMAIL_TO,
               attachmentsPattern: "${env.REPORT_FILE}"
             )
-
             echo "📧 Email sent successfully."
-
           } catch (err) {
-            echo "⚠ Email failed or SMTP not configured. HTML report available in artifacts."
+            echo "⚠ SMTP not configured. HTML report available in artifacts."
           }
         }
       }
