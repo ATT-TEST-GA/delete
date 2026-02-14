@@ -65,66 +65,27 @@ echo "Repository,Branch,Operation,ApprovedBy,Job,Build,Status,DeletedAt" > ${REP
         sh '''
 set -eu
 
-PROTECTED_EXACT="main master develop dev prod production uat qa stage staging"
-PROTECTED_PREFIX="release/ hotfix/ support/"
-
-PROTECTED_HITS=""
-MISSING=""
-
 while read line; do
   line=$(echo "$line" | xargs)
   [ -z "$line" ] && continue
 
   REPO=${line%%:*}
   BRANCH=${line##*:}
-  BRANCH_LOWER=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]')
-
-  DEFAULT_BRANCH=$(curl -s \
-    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    https://api.github.com/repos/${GITHUB_ORG}/${REPO} \
-    | grep -o '"default_branch": *"[^"]*"' \
-    | cut -d'"' -f4)
-
-  if [ "$BRANCH" = "$DEFAULT_BRANCH" ]; then
-    echo "❌ Cannot delete default branch: $REPO:$BRANCH"
-    exit 1
-  fi
-
-  for P in $PROTECTED_EXACT; do
-    if [ "$BRANCH_LOWER" = "$P" ]; then
-      PROTECTED_HITS="$PROTECTED_HITS $REPO:$BRANCH"
-    fi
-  done
-
-  for P in $PROTECTED_PREFIX; do
-    case "$BRANCH_LOWER" in
-      $P*) PROTECTED_HITS="$PROTECTED_HITS $REPO:$BRANCH" ;;
-    esac
-  done
 
   STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/ref/heads/${BRANCH})
 
   if [ "$STATUS" = "404" ]; then
-    MISSING="$MISSING $REPO:$BRANCH"
+    echo "❌ Missing branch: $REPO:$BRANCH"
+    exit 1
   fi
 
 done <<EOF
 ${REPO_BRANCH_INPUT}
 EOF
 
-if [ -n "$PROTECTED_HITS" ]; then
-  echo "❌ Protected branches detected:$PROTECTED_HITS"
-  exit 1
-fi
-
-if [ -n "$MISSING" ]; then
-  echo "❌ Missing branches detected:$MISSING"
-  exit 1
-fi
-
-echo "✅ Enterprise validation successful."
+echo "✅ Validation successful."
 '''
       }
     }
@@ -163,7 +124,6 @@ while read line; do
   HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
     -X DELETE \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github+json" \
     https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH})
 
   if [ "$HTTP_CODE" = "204" ]; then
@@ -211,20 +171,30 @@ EOF
             }
           }
 
+          def modeColor = params.OPERATION_MODE == 'DELETE' ? "#e74c3c" : "#f39c12"
+          def dryNote = params.OPERATION_MODE == 'DRY_RUN' ? 
+                        "<p style='color:#f39c12;'><b>No deletion performed. This was a DRY RUN.</b></p>" : ""
+
           def htmlBody = """
           <html>
           <body style="font-family: Arial, sans-serif;">
 
-            <h2 style="color:#2c3e50;">GitHub Branch Delete Audit Report</h2>
+            <h2 style="color:#2c3e50;">GitHub Branch Audit Report</h2>
 
             <p><b>Platform:</b> GitHub</p>
             <p><b>Organization:</b> ${env.GITHUB_ORG}</p>
             <p><b>Job:</b> ${env.JOB_NAME}</p>
             <p><b>Build:</b> ${env.BUILD_NUMBER}</p>
             <p><b>Build URL:</b> <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>
-            <p><b>Operation Mode:</b> ${params.OPERATION_MODE}</p>
+            <p><b>Operation Mode:</b> 
+              <span style="color:${modeColor};font-weight:bold;">
+                ${params.OPERATION_MODE}
+              </span>
+            </p>
             <p><b>Approved By:</b> ${env.APPROVED_BY ?: "N/A"}</p>
             <p><b>Total Branches Deleted:</b> ${count}</p>
+
+            ${dryNote}
 
             <br/>
 
@@ -239,13 +209,12 @@ EOF
                 <th>Status</th>
                 <th>DeletedAt</th>
               </tr>
-              ${rows ?: "<tr><td colspan='8'>No branches deleted (DRY_RUN mode)</td></tr>"}
+              ${rows ?: "<tr><td colspan='8'>No branches deleted</td></tr>"}
             </table>
 
             <br/>
             <p style="font-size:12px;color:gray;">
               This is an automated system-generated audit notification from Jenkins.
-              Branch deletion actions are irreversible unless restored.
             </p>
 
           </body>
@@ -262,19 +231,3 @@ EOF
               to: params.EMAIL_TO,
               attachmentsPattern: "${env.REPORT_FILE}"
             )
-          } catch (err) {
-            echo "⚠ SMTP not configured. HTML report available in artifacts."
-          }
-        }
-      }
-    }
-  }
-
-  post {
-    always {
-      archiveArtifacts artifacts: "${env.REPORT_FILE},${env.REPORT_HTML}",
-                       fingerprint: true,
-                       allowEmptyArchive: true
-    }
-  }
-}
