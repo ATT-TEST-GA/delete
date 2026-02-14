@@ -15,9 +15,7 @@ pipeline {
       defaultValue: '',
       description: '''
 ⚠⚠⚠ BRANCH DELETE WARNING ⚠⚠⚠
-
 This job PERMANENTLY deletes GitHub branches.
-
 Enter repo:branch pairs (one per line)
 
 Example:
@@ -171,11 +169,11 @@ echo "✅ Enterprise validation successful."
     // ===============================
     // MANDATORY APPROVAL
     // ===============================
-    stage('🚨 Production Approval Required') {
+    stage('🚨 Approval Required') {
       steps {
         script {
           def approver = input(
-            message: """🚨 PRODUCTION DELETE APPROVAL REQUIRED
+            message: """🚨 DELETE APPROVAL REQUIRED
 
 Branches to delete:
 
