@@ -17,7 +17,6 @@ pipeline {
 ⚠⚠⚠ BRANCH DELETE WARNING ⚠⚠⚠
 This job PERMANENTLY deletes GitHub branches.
 Enter repo:branch pairs (one per line)
-
 Example:
 APM0012058-TEST:feature/test
 '''
