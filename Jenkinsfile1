@@ -10,12 +10,6 @@ pipeline {
 
   parameters {
 
-    choice(
-      name: 'OPERATION_MODE',
-      choices: ['DRY_RUN', 'DELETE'],
-      description: 'Select operation mode'
-    )
-
     text(
       name: 'REPO_BRANCH_INPUT',
       defaultValue: '',
@@ -129,10 +123,7 @@ echo "✅ Enterprise validation successful."
       }
     }
 
-    stage('Approval Gate (DELETE Only)') {
-      when {
-        expression { params.OPERATION_MODE == 'DELETE' }
-      }
+    stage('🚨 Mandatory Production Approval') {
       steps {
         script {
           def approver = input(
@@ -150,9 +141,6 @@ ${params.REPO_BRANCH_INPUT}
     }
 
     stage('Delete Execution') {
-      when {
-        expression { params.OPERATION_MODE == 'DELETE' }
-      }
       steps {
         sh '''
 set -eu
@@ -175,8 +163,8 @@ while read line; do
 
   if [ "$HTTP_CODE" = "204" ]; then
     DELETE_TIME=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "$REPO,$BRANCH,DELETE,${APPROVED_BY:-SYSTEM},${JOB_NAME},${BUILD_NUMBER},DELETED,$DELETE_TIME" >> ${REPORT_FILE}
-    echo "$REPO,$BRANCH,DELETE,${APPROVED_BY:-SYSTEM},${JOB_NAME},${BUILD_NUMBER},DELETED,$DELETE_TIME" >> $DELETED_LIST_FILE
+    echo "$REPO,$BRANCH,DELETE,${APPROVED_BY},${JOB_NAME},${BUILD_NUMBER},DELETED,$DELETE_TIME" >> ${REPORT_FILE}
+    echo "$REPO,$BRANCH,DELETE,${APPROVED_BY},${JOB_NAME},${BUILD_NUMBER},DELETED,$DELETE_TIME" >> $DELETED_LIST_FILE
   else
     echo "❌ Delete failed ($HTTP_CODE) for $REPO:$BRANCH"
     exit 1
@@ -196,8 +184,7 @@ echo "✅ Delete completed successfully."
         script {
           def rows = ""
           if (fileExists('deleted_branches.txt')) {
-            def deletedBranches = readFile('deleted_branches.txt')
-            deletedBranches.split("\n").each { line ->
+            readFile('deleted_branches.txt').split("\n").each { line ->
               if (line?.trim()) {
                 def parts = line.split(",")
                 rows += """
@@ -220,15 +207,11 @@ echo "✅ Delete completed successfully."
           <html>
           <body>
             <h2>GitHub Branch Delete Audit Report</h2>
-
             <p><b>Environment:</b> PROD</p>
             <p><b>Job:</b> ${env.JOB_NAME}</p>
             <p><b>Build:</b> ${env.BUILD_NUMBER}</p>
-            <p><b>Operation Mode:</b> ${params.OPERATION_MODE}</p>
-            <p><b>Approved By:</b> ${env.APPROVED_BY ?: "N/A"}</p>
+            <p><b>Approved By:</b> ${env.APPROVED_BY}</p>
             <p><b>Execution Time:</b> ${new Date()}</p>
-
-            <br/>
 
             <table border="1" cellpadding="5" cellspacing="0">
               <tr style="background-color:#f2f2f2;">
@@ -241,7 +224,7 @@ echo "✅ Delete completed successfully."
                 <th>Status</th>
                 <th>DeletedAt</th>
               </tr>
-              ${rows ?: "<tr><td colspan='8'>No branches deleted (DRY_RUN mode)</td></tr>"}
+              ${rows}
             </table>
 
           </body>
