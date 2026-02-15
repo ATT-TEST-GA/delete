@@ -40,9 +40,9 @@ APM0012058-TEST:feature/test
 
   stages {
 
-    // ===============================
+    // ======================================
     // PARAMETER VALIDATION
-    // ===============================
+    // ======================================
     stage('Validate Parameters') {
       steps {
         script {
@@ -56,7 +56,7 @@ APM0012058-TEST:feature/test
                           .collect { it.trim() }
                           .findAll { it }
 
-          if (lines.size() == 0) {
+          if (lines.isEmpty()) {
             error('❌ At least one valid repo:branch entry is required.')
           }
 
@@ -64,7 +64,7 @@ APM0012058-TEST:feature/test
             lines.count { it == item } > 1
           }.unique()
 
-          if (duplicates) {
+          if (!duplicates.isEmpty()) {
             error("❌ Duplicate entries detected: ${duplicates}")
           }
 
@@ -79,14 +79,18 @@ APM0012058-TEST:feature/test
       }
     }
 
-    // ===============================
+    // ======================================
     // INITIALIZE AUDIT FILE
-    // ===============================
+    // ======================================
     stage('Initialize Audit CSV') {
       steps {
         script {
-          def jobStartTime = new Date(currentBuild.startTimeInMillis)
-                              .format("yyyy-MM-dd HH:mm:ss z", TimeZone.getDefault())
+
+          // Sandbox-safe timestamp
+          def jobStartTime = sh(
+            script: "date '+%Y-%m-%d %H:%M:%S %Z'",
+            returnStdout: true
+          ).trim()
 
           writeFile file: env.REPORT_FILE,
             text: "Repository,Branch,Operation,ApprovedBy,Job,Build,JobExecutedAt,Status,DeletedAt,GitHubResponseCode\n"
@@ -96,9 +100,9 @@ APM0012058-TEST:feature/test
       }
     }
 
-    // ===============================
+    // ======================================
     // ENTERPRISE VALIDATION
-    // ===============================
+    // ======================================
     stage('Enterprise Validation') {
       steps {
         sh '''
@@ -162,13 +166,15 @@ if [ -n "$MISSING" ]; then
   echo "❌ Missing branches detected:$MISSING"
   exit 1
 fi
+
+echo "✅ Enterprise validation successful."
 '''
       }
     }
 
-    // ===============================
+    // ======================================
     // APPROVAL GATE
-    // ===============================
+    // ======================================
     stage('🚨 Approval Required') {
       steps {
         script {
@@ -186,9 +192,9 @@ ${params.REPO_BRANCH_INPUT}
       }
     }
 
-    // ===============================
+    // ======================================
     // DELETE EXECUTION
-    // ===============================
+    // ======================================
     stage('Delete Execution') {
       steps {
         script {
@@ -214,31 +220,27 @@ ${params.REPO_BRANCH_INPUT}
               returnStdout: true
             ).trim()
 
-            def deleteTime = new Date()
-                              .format("yyyy-MM-dd HH:mm:ss z", TimeZone.getDefault())
+            def deleteTime = sh(
+              script: "date '+%Y-%m-%d %H:%M:%S %Z'",
+              returnStdout: true
+            ).trim()
 
-            if (response == "204") {
-              writeFile file: env.REPORT_FILE,
-                text: "${repo},${branch},DELETE,${env.APPROVED_BY},${env.JOB_NAME},${env.BUILD_NUMBER},${env.JOB_EXEC_TIME},DELETED,${deleteTime},${response}\n",
-                append: true
-            } else {
-              writeFile file: env.REPORT_FILE,
-                text: "${repo},${branch},DELETE,${env.APPROVED_BY},${env.JOB_NAME},${env.BUILD_NUMBER},${env.JOB_EXEC_TIME},FAILED,${deleteTime},${response}\n",
-                append: true
-            }
+            def status = (response == "204") ? "DELETED" : "FAILED"
+
+            writeFile file: env.REPORT_FILE,
+              text: "${repo},${branch},DELETE,${env.APPROVED_BY},${env.JOB_NAME},${env.BUILD_NUMBER},${env.JOB_EXEC_TIME},${status},${deleteTime},${response}\n",
+              append: true
           }
         }
       }
     }
 
-    // ===============================
+    // ======================================
     // EMAIL REPORT (SAFE)
-    // ===============================
+    // ======================================
     stage('Generate HTML Report & Send Email') {
       steps {
         script {
-
-          def jobStartTime = env.JOB_EXEC_TIME
 
           def htmlBody = """
           <html>
@@ -247,7 +249,7 @@ ${params.REPO_BRANCH_INPUT}
             <p><b>Organization:</b> ${env.GITHUB_ORG}</p>
             <p><b>Job:</b> ${env.JOB_NAME}</p>
             <p><b>Build:</b> ${env.BUILD_NUMBER}</p>
-            <p><b>Job Executed At:</b> ${jobStartTime}</p>
+            <p><b>Job Executed At:</b> ${env.JOB_EXEC_TIME}</p>
             <p><b>Approved By:</b> ${env.APPROVED_BY}</p>
             <p>Please find attached detailed CSV audit report.</p>
           </body>
