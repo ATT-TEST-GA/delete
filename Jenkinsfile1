@@ -42,9 +42,9 @@ APM0012058-TEST:feature/test
 
   stages {
 
-    // ============================
+    // =====================================================
     // PARAMETER VALIDATION
-    // ============================
+    // =====================================================
     stage('Validate Parameters') {
       steps {
         script {
@@ -81,9 +81,9 @@ APM0012058-TEST:feature/test
       }
     }
 
-    // ============================
-    // ENTERPRISE VALIDATION
-    // ============================
+    // =====================================================
+    // ENTERPRISE VALIDATION (CASE-INSENSITIVE CHECK)
+    // =====================================================
     stage('Enterprise Validation') {
       steps {
         sh '''
@@ -109,7 +109,9 @@ while read line; do
     | grep -o '"default_branch": *"[^"]*"' \
     | cut -d'"' -f4)
 
-  if [ "$BRANCH" = "$DEFAULT_BRANCH" ]; then
+  DEFAULT_BRANCH_LOWER=$(echo "$DEFAULT_BRANCH" | tr '[:upper:]' '[:lower:]')
+
+  if [ "$BRANCH_LOWER" = "$DEFAULT_BRANCH_LOWER" ]; then
     echo "❌ Cannot delete default branch: $REPO:$BRANCH"
     exit 1
   fi
@@ -153,16 +155,14 @@ echo "✅ Enterprise validation successful."
       }
     }
 
-    // ============================
+    // =====================================================
     // APPROVAL GATE
-    // ============================
+    // =====================================================
     stage('🚨 Approval Required') {
       steps {
         script {
           def approver = input(
             message: """🚨 DELETE APPROVAL REQUIRED
-
-Branches to delete:
 
 ${params.REPO_BRANCH_INPUT}
 """,
@@ -175,9 +175,9 @@ ${params.REPO_BRANCH_INPUT}
       }
     }
 
-    // ============================
+    // =====================================================
     // DELETE EXECUTION + AUDIT
-    // ============================
+    // =====================================================
     stage('Delete Execution') {
       steps {
         script {
@@ -237,9 +237,13 @@ ${params.REPO_BRANCH_INPUT}
               <tr>
                 <td>${repo}</td>
                 <td>${branch}</td>
+                <td>DELETE</td>
+                <td>${env.APPROVED_BY}</td>
+                <td>${env.JOB_NAME}</td>
+                <td>${env.BUILD_NUMBER}</td>
+                <td>${jobStartTime}</td>
                 <td>${status}</td>
                 <td>${deleteTime}</td>
-                <td>${response}</td>
               </tr>
             """)
           }
@@ -254,9 +258,9 @@ ${params.REPO_BRANCH_INPUT}
       }
     }
 
-    // ============================
-    // EMAIL SUMMARY + DETAILS
-    // ============================
+    // =====================================================
+    // EMAIL WITH FULL TABULAR DETAILS
+    // =====================================================
     stage('Send Summary Email') {
       steps {
         script {
@@ -281,15 +285,20 @@ ${params.REPO_BRANCH_INPUT}
             <p style="color:red;"><b>Failed:</b> ${env.FAILURE_COUNT}</p>
 
             <br/>
+
             <h3>Branch Deletion Details</h3>
 
             <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">
               <tr style="background-color:#f2f2f2; font-weight:bold;">
                 <th>Repository</th>
                 <th>Branch</th>
+                <th>Operation</th>
+                <th>ApprovedBy</th>
+                <th>Job</th>
+                <th>Build</th>
+                <th>JobExecutedAt</th>
                 <th>Status</th>
-                <th>Deleted At</th>
-                <th>GitHub Code</th>
+                <th>DeletedAt</th>
               </tr>
               ${env.HTML_ROWS}
             </table>
