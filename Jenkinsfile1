@@ -14,11 +14,8 @@ pipeline {
       name: 'REPO_BRANCH_INPUT',
       defaultValue: '',
       description: '''
-⚠⚠⚠ PRODUCTION DELETE WARNING ⚠⚠⚠
-
+⚠⚠⚠ BRANCH DELETE WARNING ⚠⚠⚠
 This job PERMANENTLY deletes GitHub branches.
-There is NO recovery unless backups exist.
-
 Enter repo:branch pairs (one per line)
 
 Example:
@@ -37,15 +34,15 @@ APM0012058-TEST:feature/test
     GITHUB_TOKEN      = credentials('github-pat')
     GITHUB_ORG        = 'ATT-TEST-GA'
     ALLOWED_APPROVERS = 'admin,cloudops,devopslead'
-    REPORT_FILE       = "GITHUB_BRANCH_DELETE_${BUILD_NUMBER}.csv"
+    REPORT_FILE       = "GITHUB_BRANCH_DELETE_REPORT_${BUILD_NUMBER}.csv"
     REPORT_HTML       = "GITHUB_BRANCH_DELETE_REPORT_${BUILD_NUMBER}.html"
   }
 
   stages {
 
-    // ==============================
+    // ===============================
     // PARAMETER VALIDATION
-    // ==============================
+    // ===============================
     stage('Validate Parameters') {
       steps {
         script {
@@ -63,10 +60,6 @@ APM0012058-TEST:feature/test
             error('❌ At least one valid repo:branch entry is required.')
           }
 
-          if (lines.size() > 10) {
-            error('❌ Maximum 10 branches allowed per execution.')
-          }
-
           def duplicates = lines.findAll { item ->
             lines.count { it == item } > 1
           }.unique()
@@ -81,25 +74,31 @@ APM0012058-TEST:feature/test
             }
           }
 
-          echo "✅ Parameter validation successful. Total entries: ${lines.size()}"
+          echo "✅ Validation successful. Total entries: ${lines.size()}"
         }
       }
     }
 
-    // ==============================
-    // INIT AUDIT FILE
-    // ==============================
+    // ===============================
+    // INITIALIZE AUDIT FILE
+    // ===============================
     stage('Initialize Audit CSV') {
       steps {
-        sh '''
-echo "Repository,Branch,Operation,ApprovedBy,Job,Build,Status,DeletedAt" > ${REPORT_FILE}
-'''
+        script {
+          def jobStartTime = new Date(currentBuild.startTimeInMillis)
+                              .format("yyyy-MM-dd HH:mm:ss z", TimeZone.getDefault())
+
+          writeFile file: env.REPORT_FILE,
+            text: "Repository,Branch,Operation,ApprovedBy,Job,Build,JobExecutedAt,Status,DeletedAt,GitHubResponseCode\n"
+
+          env.JOB_EXEC_TIME = jobStartTime
+        }
       }
     }
 
-    // ==============================
+    // ===============================
     // ENTERPRISE VALIDATION
-    // ==============================
+    // ===============================
     stage('Enterprise Validation') {
       steps {
         sh '''
@@ -163,22 +162,18 @@ if [ -n "$MISSING" ]; then
   echo "❌ Missing branches detected:$MISSING"
   exit 1
 fi
-
-echo "✅ Enterprise validation successful."
 '''
       }
     }
 
-    // ==============================
+    // ===============================
     // APPROVAL GATE
-    // ==============================
-    stage('🚨 Production Approval Required') {
+    // ===============================
+    stage('🚨 Approval Required') {
       steps {
         script {
           def approver = input(
-            message: """🚨 PRODUCTION DELETE APPROVAL REQUIRED
-
-Branches to delete:
+            message: """🚨 DELETE APPROVAL REQUIRED
 
 ${params.REPO_BRANCH_INPUT}
 """,
@@ -191,113 +186,70 @@ ${params.REPO_BRANCH_INPUT}
       }
     }
 
-    // ==============================
+    // ===============================
     // DELETE EXECUTION
-    // ==============================
+    // ===============================
     stage('Delete Execution') {
       steps {
-        sh '''
-set -eu
+        script {
 
-DELETED_LIST_FILE="deleted_branches.txt"
-> $DELETED_LIST_FILE
+          def lines = params.REPO_BRANCH_INPUT
+                          .split("\n")
+                          .collect { it.trim() }
+                          .findAll { it }
 
-while read line; do
-  line=$(echo "$line" | xargs)
-  [ -z "$line" ] && continue
+          lines.each { entry ->
 
-  REPO=${line%%:*}
-  BRANCH=${line##*:}
+            def repo = entry.split(":")[0]
+            def branch = entry.split(":")[1]
 
-  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X DELETE \
-    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github+json" \
-    https://api.github.com/repos/${GITHUB_ORG}/${REPO}/git/refs/heads/${BRANCH})
+            def response = sh(
+              script: """
+              curl -s -o /dev/null -w "%{http_code}" \
+              -X DELETE \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/${GITHUB_ORG}/${repo}/git/refs/heads/${branch}
+              """,
+              returnStdout: true
+            ).trim()
 
-  if [ "$HTTP_CODE" = "204" ]; then
-    DELETE_TIME=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "$REPO,$BRANCH,DELETE,${APPROVED_BY},${JOB_NAME},${BUILD_NUMBER},DELETED,$DELETE_TIME" >> ${REPORT_FILE}
-    echo "$REPO,$BRANCH,DELETE,${APPROVED_BY},${JOB_NAME},${BUILD_NUMBER},DELETED,$DELETE_TIME" >> $DELETED_LIST_FILE
-  else
-    echo "❌ Delete failed ($HTTP_CODE) for $REPO:$BRANCH"
-    exit 1
-  fi
+            def deleteTime = new Date()
+                              .format("yyyy-MM-dd HH:mm:ss z", TimeZone.getDefault())
 
-done <<EOF
-${REPO_BRANCH_INPUT}
-EOF
-
-echo "✅ Delete completed successfully."
-'''
+            if (response == "204") {
+              writeFile file: env.REPORT_FILE,
+                text: "${repo},${branch},DELETE,${env.APPROVED_BY},${env.JOB_NAME},${env.BUILD_NUMBER},${env.JOB_EXEC_TIME},DELETED,${deleteTime},${response}\n",
+                append: true
+            } else {
+              writeFile file: env.REPORT_FILE,
+                text: "${repo},${branch},DELETE,${env.APPROVED_BY},${env.JOB_NAME},${env.BUILD_NUMBER},${env.JOB_EXEC_TIME},FAILED,${deleteTime},${response}\n",
+                append: true
+            }
+          }
+        }
       }
     }
 
-    // ==============================
+    // ===============================
     // EMAIL REPORT (SAFE)
-    // ==============================
+    // ===============================
     stage('Generate HTML Report & Send Email') {
       steps {
         script {
 
-          def rows = ""
-          if (fileExists('deleted_branches.txt')) {
-            readFile('deleted_branches.txt').split("\n").each { line ->
-              if (line?.trim()) {
-                def parts = line.split(",")
-                rows += """
-                <tr>
-                  <td>${parts[0]}</td>
-                  <td>${parts[1]}</td>
-                  <td>${parts[2]}</td>
-                  <td>${parts[3]}</td>
-                  <td>${parts[4]}</td>
-                  <td>${parts[5]}</td>
-                  <td>${parts[6]}</td>
-                  <td>${parts[7]}</td>
-                </tr>
-                """
-              }
-            }
-          }
-
-          def totalDeleted = rows ? rows.count("<tr>") : 0
-
-          def jobStartTime = new Date(currentBuild.startTimeInMillis)
-                              .format("yyyy-MM-dd HH:mm:ss z", TimeZone.getDefault())
+          def jobStartTime = env.JOB_EXEC_TIME
 
           def htmlBody = """
           <html>
           <body style="font-family: Arial, sans-serif; font-size: 14px;">
             <h2>[GitHub][DELETE] Branch Audit Report</h2>
-            <p><b>Platform:</b> GitHub</p>
             <p><b>Organization:</b> ${env.GITHUB_ORG}</p>
             <p><b>Job:</b> ${env.JOB_NAME}</p>
             <p><b>Build:</b> ${env.BUILD_NUMBER}</p>
-            <p><b>Build URL:</b> <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>
             <p><b>Job Executed At:</b> ${jobStartTime}</p>
             <p><b>Approved By:</b> ${env.APPROVED_BY}</p>
-            <p><b>Total Branches Deleted:</b> ${totalDeleted}</p>
-
-            <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
-              <tr style="background-color:#f2f2f2;">
-                <th>Repository</th>
-                <th>Branch</th>
-                <th>Operation</th>
-                <th>Approved By</th>
-                <th>Job</th>
-                <th>Build</th>
-                <th>Status</th>
-                <th>Deleted At</th>
-              </tr>
-              ${rows}
-            </table>
-
-            <br/>
-            <p style="color:#555;">
-            This is an automated system-generated audit notification.
-            Please retain this email for compliance purposes.
-            </p>
+            <p>Please find attached detailed CSV audit report.</p>
           </body>
           </html>
           """
@@ -312,10 +264,8 @@ echo "✅ Delete completed successfully."
               to: params.EMAIL_TO,
               attachmentsPattern: "${env.REPORT_FILE}"
             )
-            echo "📧 Email sent successfully."
           } catch (Exception e) {
-            echo "⚠ Email sending failed, but job will continue."
-            echo "Error: ${e.getMessage()}"
+            echo "⚠ Email failed but job continues."
           }
         }
       }
