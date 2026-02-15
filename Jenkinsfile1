@@ -14,8 +14,11 @@ pipeline {
       name: 'REPO_BRANCH_INPUT',
       defaultValue: '',
       description: '''
-⚠⚠⚠ BRANCH DELETE WARNING ⚠⚠⚠
+⚠⚠⚠ PRODUCTION BRANCH DELETE WARNING ⚠⚠⚠
+
 This job PERMANENTLY deletes GitHub branches.
+There is NO recovery unless backups exist.
+
 Enter repo:branch pairs (one per line)
 
 Example:
@@ -40,9 +43,9 @@ APM0012058-TEST:feature/test
 
   stages {
 
-    // ======================================
+    // =====================================================
     // PARAMETER VALIDATION
-    // ======================================
+    // =====================================================
     stage('Validate Parameters') {
       steps {
         script {
@@ -79,30 +82,9 @@ APM0012058-TEST:feature/test
       }
     }
 
-    // ======================================
-    // INITIALIZE AUDIT FILE
-    // ======================================
-    stage('Initialize Audit CSV') {
-      steps {
-        script {
-
-          // Sandbox-safe timestamp
-          def jobStartTime = sh(
-            script: "date '+%Y-%m-%d %H:%M:%S %Z'",
-            returnStdout: true
-          ).trim()
-
-          writeFile file: env.REPORT_FILE,
-            text: "Repository,Branch,Operation,ApprovedBy,Job,Build,JobExecutedAt,Status,DeletedAt,GitHubResponseCode\n"
-
-          env.JOB_EXEC_TIME = jobStartTime
-        }
-      }
-    }
-
-    // ======================================
+    // =====================================================
     // ENTERPRISE VALIDATION
-    // ======================================
+    // =====================================================
     stage('Enterprise Validation') {
       steps {
         sh '''
@@ -172,14 +154,16 @@ echo "✅ Enterprise validation successful."
       }
     }
 
-    // ======================================
+    // =====================================================
     // APPROVAL GATE
-    // ======================================
+    // =====================================================
     stage('🚨 Approval Required') {
       steps {
         script {
           def approver = input(
             message: """🚨 DELETE APPROVAL REQUIRED
+
+Branches to delete:
 
 ${params.REPO_BRANCH_INPUT}
 """,
@@ -192,17 +176,28 @@ ${params.REPO_BRANCH_INPUT}
       }
     }
 
-    // ======================================
-    // DELETE EXECUTION
-    // ======================================
+    // =====================================================
+    // DELETE EXECUTION + AUDIT
+    // =====================================================
     stage('Delete Execution') {
       steps {
         script {
+
+          def jobStartTime = sh(
+            script: "date '+%Y-%m-%d %H:%M:%S %Z'",
+            returnStdout: true
+          ).trim()
 
           def lines = params.REPO_BRANCH_INPUT
                           .split("\n")
                           .collect { it.trim() }
                           .findAll { it }
+
+          def successCount = 0
+          def failureCount = 0
+
+          def csvContent = new StringBuilder()
+          csvContent.append("Repository,Branch,Operation,ApprovedBy,Job,Build,JobExecutedAt,Status,DeletedAt,GitHubResponseCode\n")
 
           lines.each { entry ->
 
@@ -227,18 +222,30 @@ ${params.REPO_BRANCH_INPUT}
 
             def status = (response == "204") ? "DELETED" : "FAILED"
 
-            writeFile file: env.REPORT_FILE,
-              text: "${repo},${branch},DELETE,${env.APPROVED_BY},${env.JOB_NAME},${env.BUILD_NUMBER},${env.JOB_EXEC_TIME},${status},${deleteTime},${response}\n",
-              append: true
+            if (status == "DELETED") {
+              successCount++
+            } else {
+              failureCount++
+            }
+
+            csvContent.append(
+              "${repo},${branch},DELETE,${env.APPROVED_BY},${env.JOB_NAME},${env.BUILD_NUMBER},${jobStartTime},${status},${deleteTime},${response}\n"
+            )
           }
+
+          writeFile file: env.REPORT_FILE, text: csvContent.toString()
+
+          env.SUCCESS_COUNT = successCount.toString()
+          env.FAILURE_COUNT = failureCount.toString()
+          env.JOB_EXEC_TIME = jobStartTime
         }
       }
     }
 
-    // ======================================
-    // EMAIL REPORT (SAFE)
-    // ======================================
-    stage('Generate HTML Report & Send Email') {
+    // =====================================================
+    // EMAIL SUMMARY (EXECUTIVE CLEAN)
+    // =====================================================
+    stage('Send Summary Email') {
       steps {
         script {
 
@@ -251,7 +258,19 @@ ${params.REPO_BRANCH_INPUT}
             <p><b>Build:</b> ${env.BUILD_NUMBER}</p>
             <p><b>Job Executed At:</b> ${env.JOB_EXEC_TIME}</p>
             <p><b>Approved By:</b> ${env.APPROVED_BY}</p>
-            <p>Please find attached detailed CSV audit report.</p>
+
+            <hr/>
+
+            <p><b>Total Branches Processed:</b> ${env.SUCCESS_COUNT.toInteger() + env.FAILURE_COUNT.toInteger()}</p>
+            <p style="color:green;"><b>Successfully Deleted:</b> ${env.SUCCESS_COUNT}</p>
+            <p style="color:red;"><b>Failed:</b> ${env.FAILURE_COUNT}</p>
+
+            <br/>
+            <p>Detailed audit report is attached as CSV.</p>
+            <p style="color:#666;">
+            This is an automated system-generated audit notification.
+            Please retain this email for compliance purposes.
+            </p>
           </body>
           </html>
           """
