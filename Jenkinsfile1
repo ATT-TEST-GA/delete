@@ -9,7 +9,6 @@ pipeline {
   }
 
   parameters {
-
     text(
       name: 'REPO_BRANCH_INPUT',
       defaultValue: '',
@@ -43,9 +42,9 @@ APM0012058-TEST:feature/test
 
   stages {
 
-    // =====================================================
+    // ============================
     // PARAMETER VALIDATION
-    // =====================================================
+    // ============================
     stage('Validate Parameters') {
       steps {
         script {
@@ -82,9 +81,9 @@ APM0012058-TEST:feature/test
       }
     }
 
-    // =====================================================
+    // ============================
     // ENTERPRISE VALIDATION
-    // =====================================================
+    // ============================
     stage('Enterprise Validation') {
       steps {
         sh '''
@@ -154,9 +153,9 @@ echo "✅ Enterprise validation successful."
       }
     }
 
-    // =====================================================
+    // ============================
     // APPROVAL GATE
-    // =====================================================
+    // ============================
     stage('🚨 Approval Required') {
       steps {
         script {
@@ -176,9 +175,9 @@ ${params.REPO_BRANCH_INPUT}
       }
     }
 
-    // =====================================================
+    // ============================
     // DELETE EXECUTION + AUDIT
-    // =====================================================
+    // ============================
     stage('Delete Execution') {
       steps {
         script {
@@ -197,6 +196,8 @@ ${params.REPO_BRANCH_INPUT}
           def failureCount = 0
 
           def csvContent = new StringBuilder()
+          def htmlRows = new StringBuilder()
+
           csvContent.append("Repository,Branch,Operation,ApprovedBy,Job,Build,JobExecutedAt,Status,DeletedAt,GitHubResponseCode\n")
 
           lines.each { entry ->
@@ -231,6 +232,16 @@ ${params.REPO_BRANCH_INPUT}
             csvContent.append(
               "${repo},${branch},DELETE,${env.APPROVED_BY},${env.JOB_NAME},${env.BUILD_NUMBER},${jobStartTime},${status},${deleteTime},${response}\n"
             )
+
+            htmlRows.append("""
+              <tr>
+                <td>${repo}</td>
+                <td>${branch}</td>
+                <td>${status}</td>
+                <td>${deleteTime}</td>
+                <td>${response}</td>
+              </tr>
+            """)
           }
 
           writeFile file: env.REPORT_FILE, text: csvContent.toString()
@@ -238,21 +249,25 @@ ${params.REPO_BRANCH_INPUT}
           env.SUCCESS_COUNT = successCount.toString()
           env.FAILURE_COUNT = failureCount.toString()
           env.JOB_EXEC_TIME = jobStartTime
+          env.HTML_ROWS = htmlRows.toString()
         }
       }
     }
 
-    // =====================================================
-    // EMAIL SUMMARY (EXECUTIVE CLEAN)
-    // =====================================================
+    // ============================
+    // EMAIL SUMMARY + DETAILS
+    // ============================
     stage('Send Summary Email') {
       steps {
         script {
+
+          def totalProcessed = env.SUCCESS_COUNT.toInteger() + env.FAILURE_COUNT.toInteger()
 
           def htmlBody = """
           <html>
           <body style="font-family: Arial, sans-serif; font-size: 14px;">
             <h2>[GitHub][DELETE] Branch Audit Report</h2>
+
             <p><b>Organization:</b> ${env.GITHUB_ORG}</p>
             <p><b>Job:</b> ${env.JOB_NAME}</p>
             <p><b>Build:</b> ${env.BUILD_NUMBER}</p>
@@ -261,12 +276,25 @@ ${params.REPO_BRANCH_INPUT}
 
             <hr/>
 
-            <p><b>Total Branches Processed:</b> ${env.SUCCESS_COUNT.toInteger() + env.FAILURE_COUNT.toInteger()}</p>
+            <p><b>Total Branches Processed:</b> ${totalProcessed}</p>
             <p style="color:green;"><b>Successfully Deleted:</b> ${env.SUCCESS_COUNT}</p>
             <p style="color:red;"><b>Failed:</b> ${env.FAILURE_COUNT}</p>
 
             <br/>
-            <p>Detailed audit report is attached as CSV.</p>
+            <h3>Branch Deletion Details</h3>
+
+            <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">
+              <tr style="background-color:#f2f2f2; font-weight:bold;">
+                <th>Repository</th>
+                <th>Branch</th>
+                <th>Status</th>
+                <th>Deleted At</th>
+                <th>GitHub Code</th>
+              </tr>
+              ${env.HTML_ROWS}
+            </table>
+
+            <br/>
             <p style="color:#666;">
             This is an automated system-generated audit notification.
             Please retain this email for compliance purposes.
