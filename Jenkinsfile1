@@ -14,12 +14,9 @@ pipeline {
       defaultValue: '',
       description: '''
 ⚠⚠⚠ PRODUCTION BRANCH DELETE WARNING ⚠⚠⚠
-
 This job PERMANENTLY deletes GitHub branches.
 There is NO recovery unless backups exist.
-
 Enter repo:branch pairs (one per line)
-
 Example:
 APM0012058-TEST:feature/test
 '''
