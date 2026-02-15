@@ -76,13 +76,13 @@ APM0012058-TEST:feature/test
             }
           }
 
-          echo "✅ Validation successful. Total entries: ${lines.size()}"
+          echo "✅ Parameter validation successful. Total entries: ${lines.size()}"
         }
       }
     }
 
     // =====================================================
-    // ENTERPRISE VALIDATION (CASE-INSENSITIVE CHECK)
+    // ENTERPRISE VALIDATION (DEFAULT + PROTECTED + EXISTENCE CHECK)
     // =====================================================
     stage('Enterprise Validation') {
       steps {
@@ -259,7 +259,7 @@ ${params.REPO_BRANCH_INPUT}
     }
 
     // =====================================================
-    // EMAIL WITH FULL TABULAR DETAILS
+    // EMAIL REPORT
     // =====================================================
     stage('Send Summary Email') {
       steps {
